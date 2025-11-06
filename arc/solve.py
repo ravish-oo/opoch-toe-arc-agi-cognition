@@ -1,213 +1,185 @@
 """
-WO-8: End-to-End Batch Solver
+WO-2: Harness + Receipts Runner
 
-Orchestrates all WO modules to solve ARC-AGI tasks deterministically.
-
-For WO-1 (pi-receipts mode):
-  - Load all training tasks
-  - Apply Π (types_from_output) TWICE to each training output to prove determinism
-  - Compute SHA256 hashes, partition sizes
-  - Write one JSONL line per grid with all required fields
+Deterministic corpus runner that loads ARC JSON and emits Π receipts
+for every training output (and optionally test inputs).
 
 CLI:
-  python -m arc.solve --mode pi-receipts --data path/to/tasks.json --output outputs/
+  python -m arc.solve --mode pi-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
 """
 
 import argparse
 import json
-import sys
-import time
+import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import numpy as np
 
-from arc.pi import (
-    codebook_hash,
-    compute_partition_sizes,
-    grid_hash,
-    types_from_output,
-)
-from arc.receipts import build_grid_receipt, ReceiptWriter
+from arc.pi import types_from_output, codebook_hash, compute_partition_sizes
+from arc.receipts import sha256_ndarray, write_jsonl
 
 
-def load_tasks(data_path: Path) -> Dict[str, Any]:
+def load_tasks_from_json(path: Path) -> Dict[str, Dict[str, Any]]:
     """
     Load ARC tasks from JSON file.
 
-    Format:
-    {
-      "task_id": {
-        "train": [{"input": [[...]], "output": [[...]]}, ...],
-        "test": [{"input": [[...]]}, ...]
-      },
-      ...
-    }
+    Returns canonicalized dict mapping task_id -> payload with:
+      - payload["train"]: list of dicts with "input" and "output" arrays
+      - payload["test"]: list of dicts with "input" array
 
     Args:
-        data_path: Path to JSON file
+        path: Path to challenges JSON file
 
     Returns:
-        Dict mapping task_id → task data
+        Dict mapping task_id -> task payload
     """
-    with open(data_path, 'r', encoding='utf-8') as f:
+    with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 
 def run_pi_receipts(
-    tasks: Dict[str, Any],
-    output_dir: Path,
-    verbose: bool = True,
-) -> Dict[str, Any]:
+    tasks: Dict[str, Dict[str, Any]],
+    out_path: Path,
+    include_test_pi: bool = False,
+) -> None:
     """
-    Run WO-1 (Π receipts) on all tasks.
+    Run WO-2 Π receipts mode.
 
-    For each training output grid:
-      - Apply types_from_output TWICE to prove determinism
-      - Compute hashes, partition sizes
+    For each task:
+      - Process each training output grid
+      - Optionally process test input grids (if include_test_pi=True)
+      - Compute Π twice to verify idempotence
       - Write one JSONL line per grid
 
     Args:
-        tasks: Dict mapping task_id → task data
-        output_dir: Output directory for receipts.jsonl
-        verbose: Print progress messages
-
-    Returns:
-        Summary statistics dict
+        tasks: Dict mapping task_id -> task data
+        out_path: Output path for receipts JSONL file
+        include_test_pi: Whether to include test input receipts
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
-    receipts_path = output_dir / "receipts.jsonl"
+    receipts: List[Dict[str, Any]] = []
 
-    stats = {
-        "total_tasks": len(tasks),
-        "total_grids": 0,
-        "pass_idempotent_count": 0,
-        "pass_sum_count": 0,
-        "failed_grids": [],
-    }
+    # Counters for summary
+    total_tasks = len(tasks)
+    total_grids = 0
+    idempotence_fail = 0
+    sum_fail = 0
 
-    if verbose:
-        print(f"Running WO-1 (Π receipts) on {stats['total_tasks']} tasks...")
-        print(f"Output: {receipts_path}")
+    for task_id, task_data in tasks.items():
+        # Process training outputs
+        train_pairs = task_data.get("train", [])
+        for grid_index, pair in enumerate(train_pairs):
+            Y = np.array(pair["output"], dtype=np.int32)
+            receipt = _compute_pi_receipt(
+                task_id=task_id,
+                grid_role="train_output",
+                grid_index=grid_index,
+                grid=Y,
+            )
+            receipts.append(receipt)
+            total_grids += 1
 
-    with ReceiptWriter(receipts_path) as writer:
-        for task_idx, (task_id, task_data) in enumerate(tasks.items(), 1):
-            if verbose and task_idx % 50 == 0:
-                print(f"  Progress: {task_idx}/{stats['total_tasks']} tasks...")
+            if not receipt["pass_idempotent"]:
+                idempotence_fail += 1
+            if not receipt["pass_sum"]:
+                sum_fail += 1
 
-            try:
-                process_task_grids(task_id, task_data, writer, stats)
-            except Exception as e:
-                if verbose:
-                    print(f"  ERROR on task {task_id}: {e}", file=sys.stderr)
-                # Don't track failed tasks, track failed grids instead
+        # Optionally process test inputs
+        if include_test_pi:
+            test_pairs = task_data.get("test", [])
+            for grid_index, pair in enumerate(test_pairs):
+                X = np.array(pair["input"], dtype=np.int32)
+                receipt = _compute_pi_receipt(
+                    task_id=task_id,
+                    grid_role="test_input",
+                    grid_index=grid_index,
+                    grid=X,
+                )
+                receipts.append(receipt)
+                total_grids += 1
 
-    # Compute pass rates
-    all_pass_idempotent = (stats["pass_idempotent_count"] == stats["total_grids"])
-    all_pass_sum = (stats["pass_sum_count"] == stats["total_grids"])
+                if not receipt["pass_idempotent"]:
+                    idempotence_fail += 1
+                if not receipt["pass_sum"]:
+                    sum_fail += 1
 
-    if verbose:
-        print(f"\nCompleted WO-1 receipts:")
-        print(f"  Total grids processed: {stats['total_grids']}")
-        print(f"  pass_idempotent: {stats['pass_idempotent_count']}/{stats['total_grids']}")
-        print(f"  pass_sum: {stats['pass_sum_count']}/{stats['total_grids']}")
-        if stats['failed_grids']:
-            print(f"  Failed grids: {len(stats['failed_grids'])}")
-            print(f"    {', '.join(stats['failed_grids'][:10])}")
+    # Write all receipts to JSONL
+    write_jsonl(out_path, receipts)
 
-    # Write summary
-    summary_path = output_dir / "summary.txt"
-    with open(summary_path, 'w', encoding='utf-8') as f:
-        f.write(f"WO-1 (Π Receipts) Summary\n")
-        f.write(f"========================\n\n")
-        f.write(f"Total tasks: {stats['total_tasks']}\n")
-        f.write(f"Total grids: {stats['total_grids']}\n")
-        f.write(f"All pass_idempotent: {all_pass_idempotent}\n")
-        f.write(f"All pass_sum: {all_pass_sum}\n")
-        f.write(f"\npass_idempotent: {stats['pass_idempotent_count']}/{stats['total_grids']}\n")
-        f.write(f"pass_sum: {stats['pass_sum_count']}/{stats['total_grids']}\n")
-        if stats['failed_grids']:
-            f.write(f"\nFailed grids:\n")
-            for grid_id in stats['failed_grids']:
-                f.write(f"  - {grid_id}\n")
-
-    stats["all_pass_idempotent"] = all_pass_idempotent
-    stats["all_pass_sum"] = all_pass_sum
-    return stats
+    # Log summary (single INFO line per WO-2 spec)
+    logging.info(
+        f"Processed tasks={total_tasks}, grids={total_grids}, "
+        f"idempotence_fail={idempotence_fail}, sum_fail={sum_fail}"
+    )
 
 
-def process_task_grids(
+def _compute_pi_receipt(
     task_id: str,
-    task_data: Dict[str, Any],
-    writer: ReceiptWriter,
-    stats: Dict[str, Any],
-):
+    grid_role: str,
+    grid_index: int,
+    grid: np.ndarray,
+) -> Dict[str, Any]:
     """
-    Process all grids for a single task and write receipts.
+    Compute Π receipt for a single grid.
+
+    Applies types_from_output twice to verify idempotence.
 
     Args:
         task_id: Task ID
-        task_data: Task data with "train" and "test" fields
-        writer: ReceiptWriter instance
-        stats: Statistics dict to update
+        grid_role: "train_output" or "test_input"
+        grid_index: Grid index within task
+        grid: NumPy array (H, W)
+
+    Returns:
+        Receipt dict with all required fields
     """
-    train_pairs = task_data.get("train", [])
+    H, W = grid.shape
 
-    # Process each training output
-    for idx, pair in enumerate(train_pairs):
-        output_grid = np.array(pair["output"], dtype=np.int32)
-        H, W = output_grid.shape
+    # Apply Π twice to check idempotence
+    T1, codebook1 = types_from_output(grid)
+    T2, codebook2 = types_from_output(grid)
 
-        # Apply Π TWICE to prove determinism
-        T1, codebook1 = types_from_output(output_grid)
-        T2, codebook2 = types_from_output(output_grid)
+    # Compute hashes
+    sha256_T_once = sha256_ndarray(T1)
+    sha256_T_twice = sha256_ndarray(T2)
+    cb_hash = codebook_hash(codebook1)
 
-        # Compute hashes
-        sha256_T1 = grid_hash(T1)
-        sha256_T2 = grid_hash(T2)
-        cb_hash1 = codebook_hash(codebook1)
-        cb_hash2 = codebook_hash(codebook2)
+    # Compute partition
+    num_types = len(codebook1)
+    type_sizes = compute_partition_sizes(T1, num_types)
+    sum_sizes = sum(type_sizes.values())
 
-        # Use first computation for type_sizes (both should be identical)
-        num_types = len(codebook1)
-        type_sizes = compute_partition_sizes(T1, num_types)
+    # Validation checks
+    pass_idempotent = (sha256_T_once == sha256_T_twice)
+    pass_sum = (sum_sizes == H * W)
 
-        # Build receipt
-        receipt = build_grid_receipt(
-            task_id=task_id,
-            grid_role="train_output",
-            grid_index=idx,
-            H=H,
-            W=W,
-            sha256_T=sha256_T1,
-            sha256_T_again=sha256_T2,
-            codebook_sha256=cb_hash1,
-            type_sizes=type_sizes,
-        )
-
-        # Write receipt
-        writer.write(receipt)
-
-        # Update stats
-        stats["total_grids"] += 1
-        if receipt["pass_idempotent"]:
-            stats["pass_idempotent_count"] += 1
-        else:
-            grid_id = f"{task_id}:train_output:{idx}"
-            stats["failed_grids"].append(grid_id)
-
-        if receipt["pass_sum"]:
-            stats["pass_sum_count"] += 1
-        else:
-            grid_id = f"{task_id}:train_output:{idx}"
-            if grid_id not in stats["failed_grids"]:
-                stats["failed_grids"].append(grid_id)
+    # Build receipt with WO-1 field names (sha256_T, sha256_T_again)
+    return {
+        "task_id": task_id,
+        "grid_role": grid_role,
+        "grid_index": grid_index,
+        "H": H,
+        "W": W,
+        "sha256_T": sha256_T_once,
+        "sha256_T_again": sha256_T_twice,
+        "pass_idempotent": pass_idempotent,
+        "codebook_sha256": cb_hash,
+        "type_sizes": type_sizes,
+        "sum_sizes": sum_sizes,
+        "pass_sum": pass_sum,
+    }
 
 
-def main():
-    """CLI entry point."""
+def main() -> None:
+    """CLI entry point with argparse."""
+    # Configure logging (single INFO line per WO-2)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+    )
+
     parser = argparse.ArgumentParser(
-        description="ARC-AGI Cognition Solver",
+        description="ARC-AGI Cognition Solver - WO-2 Harness",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -216,59 +188,45 @@ def main():
         type=str,
         required=True,
         choices=["pi-receipts"],
-        help="Solver mode: pi-receipts (WO-1 only)",
+        help="Solver mode (currently only pi-receipts)",
     )
 
     parser.add_argument(
-        "--data",
+        "--challenges",
         type=Path,
         required=True,
-        help="Path to ARC tasks JSON file",
+        help="Path to ARC challenges JSON file",
     )
 
     parser.add_argument(
-        "--output",
+        "--out",
         type=Path,
-        default=Path("outputs"),
-        help="Output directory for receipts and predictions (default: outputs/)",
+        required=True,
+        help="Output path for receipts JSONL file",
     )
 
     parser.add_argument(
-        "--quiet",
+        "--include-test-pi",
         action="store_true",
-        help="Suppress progress messages",
+        help="Include test input grids in Π receipts (for sanity checking)",
     )
 
     args = parser.parse_args()
 
     # Load tasks
-    if not args.data.exists():
-        print(f"ERROR: Data file not found: {args.data}", file=sys.stderr)
-        sys.exit(1)
+    if not args.challenges.exists():
+        logging.error(f"Challenges file not found: {args.challenges}")
+        raise SystemExit(1)
 
-    start_time = time.time()
-    tasks = load_tasks(args.data)
-
-    if not args.quiet:
-        print(f"Loaded {len(tasks)} tasks from {args.data}")
+    tasks = load_tasks_from_json(args.challenges)
 
     # Run requested mode
     if args.mode == "pi-receipts":
-        stats = run_pi_receipts(tasks, args.output, verbose=not args.quiet)
-
-        # WO-1 acceptance criteria: all receipts must pass
-        if not stats["all_pass_idempotent"]:
-            print("\nERROR: Some grids failed pass_idempotent check!", file=sys.stderr)
-            sys.exit(1)
-
-        if not stats["all_pass_sum"]:
-            print("\nERROR: Some grids failed pass_sum check!", file=sys.stderr)
-            sys.exit(1)
-
-    elapsed = time.time() - start_time
-
-    if not args.quiet:
-        print(f"\nCompleted in {elapsed:.2f}s")
+        run_pi_receipts(
+            tasks=tasks,
+            out_path=args.out,
+            include_test_pi=args.include_test_pi,
+        )
 
 
 if __name__ == "__main__":

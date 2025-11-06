@@ -1,13 +1,19 @@
 now let's expand this wo. so now tell me what kinds of "mature, well-documented Python libraries for every primitive we need" can be reused for
-## WO-1 — Π Ruler (Types)
+## WO-3A — FREE Verifiers: Identity / Mirror-Concat / V-Double / Concat-Dup
 
-**Goal:** Implement the fixed, idempotent Π typing on any grid.
+**Goal:** Per training pair, verify “simple” terminals exactly (color-level equality where defined).
 
-* **Scope:** φ stencil (center; N/E/S/W; 2-step ring; edge flags; parity; sentinel −1). Hash φ→type ids. Deterministic ordering.
+* **Scope:**
+
+  * `identity` (shape equal),
+  * `h-mirror-concat` (rev|id, id|rev),
+  * `v-double`,
+  * `h-concat-dup`, `v-concat-dup`.
 * **Libs:** `numpy`
-* **IO:** `types_from_output(Y) -> (T, codebook)`
-* **Receipts:** idempotence (hash(Π(Y)) == hash(Π(Π(Y)))), codebook hash stability, partition totals ∑|S| = H·W.
-* **Pass criteria:** All 1000 tasks pass receipts A1–A3 (idempotence, stability, totals).
+* **IO:** `verify_simple_free(X,Y) -> List[(kind, params)]` per pair.
+* **Receipts:** for each pair, emit the candidate set; for each task, union of per-pair candidates.
+* **Pass criteria:** Runs on all 1000; no heuristics; receipts list exactly what matched.
+
 now here are the things u must take care of:
 1. now thr is nothing called underspecificy in dev. instead  we shud be ovespecific. but anything that u r specifying must be STRICTLY grounded in our anchor docs we created.
 2. do tell in WO which anchor docs they shud refer to before proceeding if any..
