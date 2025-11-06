@@ -1,7 +1,0 @@
-WO-1 (Π Receipts) Summary
-========================
-
-Total tasks: 1000
-Total grids: 3232
-All idempotent: False
-Failed tasks: 0

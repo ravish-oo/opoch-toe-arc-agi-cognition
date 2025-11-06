@@ -38,7 +38,7 @@ now ur role is that of an implemetner. following is the work order u need to imp
   ---
 
   ---
-  wo above has all the details u need.
+  wo above has all the details u need. pls note any code in WO is sketch/illustrative only
   ps understand and see if u hv 100% clarity on what needs to be done.
   once u confirm above, we can start coding!
 ─────────────────────────────────────────────

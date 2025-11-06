@@ -38,7 +38,7 @@ do refer to docs/repo_structure.md to knw what to find whr..
 
 
 # latest
-now ur role is that of a reviwer+tester. following is the work order u need to review+test.
+now ur role is that of a reviwer+tester. u dont writ core code files or edit them. u can write test files if needed. following is the work order u need to review+test.
   refer to @docs/repo_structure.md  to knw repo strucutre.
   data/ folder has training challenges of arc agi 
   ---
