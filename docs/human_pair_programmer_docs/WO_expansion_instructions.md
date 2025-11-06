@@ -1,13 +1,15 @@
 now let's expand this wo. so now tell me what kinds of "mature, well-documented Python libraries for every primitive we need" can be reused for
-## WO-3D — FREE Verifier: SBS-Param (Templates from Π(X))
+## WO-4 — FREE Intersection + Pick (Frozen Order)
 
-**Goal:** Prove SBS using **templates from input types** (the 007bbfb7 fix).
+**Goal:** Task-level proof: intersect per-pair candidates and select terminal per frozen order.
 
-* **Scope:** Same as 3C but templates are `Π(X)` 3×3 blocks; σ(x)=1_{x≠0} or finite table; verify blocks of `t_Y` equal templates chosen by σ.
+* **Scope:** Intersect candidates across all train pairs **per slot**; prefer no D4/translate (slots included but default “none” in v0); select terminal by fixed order:
+
+  1. identity, 2) {h-mirror, v-double, h/v-dup}, 3) tile, 4) SBS-Y, 5) SBS-param.
 * **Libs:** `numpy`
-* **IO:** `verify_SBS_param(X, Y) -> Optional(("SBS-param", (sh,sw, σ_table, template_hashes_of_ΠX)))`
-* **Receipts:** Same structure as 3C, but logs Π(X) template hashes.
-* **Pass criteria:** Strict; no quotas from inputs (types only).
+* **IO:** `prove_free(task) -> ("FREE_PROVEN", tuple) | ("FREE_UNPROVEN", reason)`
+* **Receipts:** list all candidates per pair, the intersected set, and the chosen terminal with parameters.
+* **Pass criteria:** On the full corpus, produces a proven tuple for ~**600+** tasks (the “attemptable now” bucket) and marks others unproven; no ad-hoc fallbacks.
 
 now here are the things u must take care of:
 1. now thr is nothing called underspecificy in dev. instead  we shud be ovespecific. but anything that u r specifying must be STRICTLY grounded in our anchor docs we created.

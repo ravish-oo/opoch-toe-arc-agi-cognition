@@ -1,5 +1,5 @@
 """
-Harness + Receipts Runner (WO-2, WO-3A, WO-3B, WO-3C)
+Harness + Receipts Runner (WO-2, WO-3A, WO-3B, WO-3C, WO-3D)
 
 Deterministic corpus runner that loads ARC JSON and emits receipts.
 
@@ -8,12 +8,14 @@ Modes:
   - free-simple-receipts: Simple FREE verifiers at color level (WO-3A)
   - free-tile-receipts: Types-periodic tile verifier (WO-3B)
   - free-sbs-y-receipts: SBS-Y verifier on types (WO-3C)
+  - free-sbs-param-receipts: SBS-Param verifier on types (WO-3D)
 
 CLI:
   python -m arc.solve --mode pi-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
   python -m arc.solve --mode free-simple-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
   python -m arc.solve --mode free-tile-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
   python -m arc.solve --mode free-sbs-y-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
+  python -m arc.solve --mode free-sbs-param-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
 """
 
 import argparse
@@ -31,7 +33,8 @@ from arc.free_simple import (
     verify_tile_types, get_tile_detailed_checks
 )
 from arc.free_sbs import (
-    verify_SBS_Y, get_sbs_y_detailed_checks
+    verify_SBS_Y, get_sbs_y_detailed_checks,
+    verify_SBS_param, get_sbs_param_detailed_checks
 )
 
 
@@ -395,6 +398,69 @@ def run_free_sbs_y_receipts(
     )
 
 
+def run_free_sbs_param_receipts(
+    tasks: Dict[str, Dict[str, Any]],
+    out_path: Path,
+) -> None:
+    """
+    Run WO-3D SBS-Param verifier mode.
+
+    For each task:
+      - Process each training pair (X->Y)
+      - Compute T_X = Π(X) and T_Y = Π(Y) type mosaics
+      - Verify SBS-Param candidate on types (templates from Π(X))
+      - Write one record per pair
+
+    Args:
+        tasks: Dict mapping task_id -> task data
+        out_path: Output path for receipts JSONL file
+    """
+    receipts: List[Dict[str, Any]] = []
+
+    # Counters for summary
+    total_tasks = len(tasks)
+    total_pairs = 0
+    sbs_param_match_count = 0
+
+    for task_id, task_data in tasks.items():
+        train_pairs = task_data.get("train", [])
+
+        # Process each training pair
+        for pair_index, pair in enumerate(train_pairs):
+            X = np.array(pair["input"], dtype=np.int32)
+            Y = np.array(pair["output"], dtype=np.int32)
+
+            # Verify SBS-Param on types (computes Π internally)
+            candidate = verify_SBS_param(X, Y)
+
+            # Get detailed checks for receipt
+            detailed_checks = get_sbs_param_detailed_checks(X, Y)
+
+            # Build per-pair receipt
+            pair_receipt = {
+                "task_id": task_id,
+                "pair_index": pair_index,
+                "free_sbs_param": detailed_checks,
+            }
+
+            # Add candidate field only if verification succeeded
+            if candidate is not None:
+                kind, (sh, sw, sigma_table, template_hashes) = candidate
+                pair_receipt["candidate"] = [kind, [sh, sw]]
+                sbs_param_match_count += 1
+
+            receipts.append(pair_receipt)
+            total_pairs += 1
+
+    # Write all receipts to JSONL
+    write_jsonl(out_path, receipts)
+
+    # Log summary
+    logging.info(
+        f"Processed tasks={total_tasks}, pairs={total_pairs}, sbs_param_matches={sbs_param_match_count}"
+    )
+
+
 def main() -> None:
     """CLI entry point with argparse."""
     # Configure logging (single INFO line per WO-2)
@@ -412,8 +478,8 @@ def main() -> None:
         "--mode",
         type=str,
         required=True,
-        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts"],
-        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), or free-sbs-y-receipts (WO-3C)",
+        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts", "free-sbs-param-receipts"],
+        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), free-sbs-y-receipts (WO-3C), or free-sbs-param-receipts (WO-3D)",
     )
 
     parser.add_argument(
@@ -464,6 +530,11 @@ def main() -> None:
         )
     elif args.mode == "free-sbs-y-receipts":
         run_free_sbs_y_receipts(
+            tasks=tasks,
+            out_path=args.out,
+        )
+    elif args.mode == "free-sbs-param-receipts":
+        run_free_sbs_param_receipts(
             tasks=tasks,
             out_path=args.out,
         )
