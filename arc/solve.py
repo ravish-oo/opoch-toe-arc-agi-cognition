@@ -1,5 +1,5 @@
 """
-Harness + Receipts Runner (WO-2, WO-3A, WO-3B)
+Harness + Receipts Runner (WO-2, WO-3A, WO-3B, WO-3C)
 
 Deterministic corpus runner that loads ARC JSON and emits receipts.
 
@@ -7,11 +7,13 @@ Modes:
   - pi-receipts: Π receipts for training outputs (WO-2)
   - free-simple-receipts: Simple FREE verifiers at color level (WO-3A)
   - free-tile-receipts: Types-periodic tile verifier (WO-3B)
+  - free-sbs-y-receipts: SBS-Y verifier on types (WO-3C)
 
 CLI:
   python -m arc.solve --mode pi-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
   python -m arc.solve --mode free-simple-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
   python -m arc.solve --mode free-tile-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
+  python -m arc.solve --mode free-sbs-y-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
 """
 
 import argparse
@@ -27,6 +29,9 @@ from arc.receipts import sha256_ndarray, write_jsonl
 from arc.free_simple import (
     verify_simple_free, get_detailed_checks,
     verify_tile_types, get_tile_detailed_checks
+)
+from arc.free_sbs import (
+    verify_SBS_Y, get_sbs_y_detailed_checks
 )
 
 
@@ -324,6 +329,72 @@ def run_free_tile_receipts(
     )
 
 
+def run_free_sbs_y_receipts(
+    tasks: Dict[str, Dict[str, Any]],
+    out_path: Path,
+) -> None:
+    """
+    Run WO-3C SBS-Y verifier mode.
+
+    For each task:
+      - Process each training pair (X->Y)
+      - Compute T_Y = Π(Y) type mosaic
+      - Verify SBS-Y candidate on types
+      - Write one record per pair
+
+    Args:
+        tasks: Dict mapping task_id -> task data
+        out_path: Output path for receipts JSONL file
+    """
+    receipts: List[Dict[str, Any]] = []
+
+    # Counters for summary
+    total_tasks = len(tasks)
+    total_pairs = 0
+    sbs_y_match_count = 0
+
+    for task_id, task_data in tasks.items():
+        train_pairs = task_data.get("train", [])
+
+        # Process each training pair
+        for pair_index, pair in enumerate(train_pairs):
+            X = np.array(pair["input"], dtype=np.int32)
+            Y = np.array(pair["output"], dtype=np.int32)
+
+            # Compute type mosaic T_Y from Π(Y)
+            T_Y, _ = types_from_output(Y)
+
+            # Verify SBS-Y on types
+            candidate = verify_SBS_Y(X, T_Y)
+
+            # Get detailed checks for receipt
+            detailed_checks = get_sbs_y_detailed_checks(X, T_Y)
+
+            # Build per-pair receipt
+            pair_receipt = {
+                "task_id": task_id,
+                "pair_index": pair_index,
+                "free_sbs_y": detailed_checks,
+            }
+
+            # Add candidate field only if verification succeeded
+            if candidate is not None:
+                kind, (sh, sw, sigma_table, template_hashes) = candidate
+                pair_receipt["candidate"] = [kind, [sh, sw]]
+                sbs_y_match_count += 1
+
+            receipts.append(pair_receipt)
+            total_pairs += 1
+
+    # Write all receipts to JSONL
+    write_jsonl(out_path, receipts)
+
+    # Log summary
+    logging.info(
+        f"Processed tasks={total_tasks}, pairs={total_pairs}, sbs_y_matches={sbs_y_match_count}"
+    )
+
+
 def main() -> None:
     """CLI entry point with argparse."""
     # Configure logging (single INFO line per WO-2)
@@ -341,8 +412,8 @@ def main() -> None:
         "--mode",
         type=str,
         required=True,
-        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts"],
-        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), or free-tile-receipts (WO-3B)",
+        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts"],
+        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), or free-sbs-y-receipts (WO-3C)",
     )
 
     parser.add_argument(
@@ -388,6 +459,11 @@ def main() -> None:
         )
     elif args.mode == "free-tile-receipts":
         run_free_tile_receipts(
+            tasks=tasks,
+            out_path=args.out,
+        )
+    elif args.mode == "free-sbs-y-receipts":
+        run_free_sbs_y_receipts(
             tasks=tasks,
             out_path=args.out,
         )

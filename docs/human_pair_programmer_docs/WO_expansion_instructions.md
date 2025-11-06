@@ -1,13 +1,13 @@
 now let's expand this wo. so now tell me what kinds of "mature, well-documented Python libraries for every primitive we need" can be reused for
-## WO-3C — FREE Verifier: SBS-Y (Selector-Driven Block Substitution from Π(Y))
+## WO-3D — FREE Verifier: SBS-Param (Templates from Π(X))
 
-**Goal:** Prove SBS using **templates from training output types**.
+**Goal:** Prove SBS using **templates from input types** (the 007bbfb7 fix).
 
-* **Scope:** For h/H = sh, w/W = sw; for each block (i,j), assert `t_Y[i*sh:(i+1)*sh, j*sw:(j+1)*sw] == B^{σ(X[i,j])}` where templates (B^{(m)}) come from Π(Y) blocks; σ is finite on palette.
+* **Scope:** Same as 3C but templates are `Π(X)` 3×3 blocks; σ(x)=1_{x≠0} or finite table; verify blocks of `t_Y` equal templates chosen by σ.
 * **Libs:** `numpy`
-* **IO:** `verify_SBS_Y(X, T_Y) -> Optional(("SBS-Y", (sh,sw, σ_table, template_hashes)))`
-* **Receipts:** `(sh,sw)`, σ table, per-template type hashes; per-block match booleans.
-* **Pass criteria:** Strict match only; emits full proof objects.
+* **IO:** `verify_SBS_param(X, Y) -> Optional(("SBS-param", (sh,sw, σ_table, template_hashes_of_ΠX)))`
+* **Receipts:** Same structure as 3C, but logs Π(X) template hashes.
+* **Pass criteria:** Strict; no quotas from inputs (types only).
 
 now here are the things u must take care of:
 1. now thr is nothing called underspecificy in dev. instead  we shud be ovespecific. but anything that u r specifying must be STRICTLY grounded in our anchor docs we created.
