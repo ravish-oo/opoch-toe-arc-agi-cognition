@@ -1,13 +1,13 @@
 now let's expand this wo. so now tell me what kinds of "mature, well-documented Python libraries for every primitive we need" can be reused for
-## WO-3B — FREE Verifier: Types-Periodic Tile
+## WO-3C — FREE Verifier: SBS-Y (Selector-Driven Block Substitution from Π(Y))
 
-**Goal:** Detect integer blow-up by **types** periodicity (FREE).
+**Goal:** Prove SBS using **templates from training output types**.
 
-* **Scope:** Verify `tile (sh,sw)` by checking `T_Y[r,c] == T_Y[r%H, c%W]`.
+* **Scope:** For h/H = sh, w/W = sw; for each block (i,j), assert `t_Y[i*sh:(i+1)*sh, j*sw:(j+1)*sw] == B^{σ(X[i,j])}` where templates (B^{(m)}) come from Π(Y) blocks; σ is finite on palette.
 * **Libs:** `numpy`
-* **IO:** `verify_tile_types(X,Y,T_Y) -> Optional(("tile",(sh,sw)))`
-* **Receipts:** record `(sh,sw)` and a boolean “types periodicity” proof.
-* **Pass criteria:** No false positives on corpus; receipts present when true.
+* **IO:** `verify_SBS_Y(X, T_Y) -> Optional(("SBS-Y", (sh,sw, σ_table, template_hashes)))`
+* **Receipts:** `(sh,sw)`, σ table, per-template type hashes; per-block match booleans.
+* **Pass criteria:** Strict match only; emits full proof objects.
 
 now here are the things u must take care of:
 1. now thr is nothing called underspecificy in dev. instead  we shud be ovespecific. but anything that u r specifying must be STRICTLY grounded in our anchor docs we created.
