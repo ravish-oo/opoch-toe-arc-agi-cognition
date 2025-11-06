@@ -1,11 +1,15 @@
 """
-WO-2: Harness + Receipts Runner
+Harness + Receipts Runner (WO-2, WO-3A)
 
-Deterministic corpus runner that loads ARC JSON and emits Π receipts
-for every training output (and optionally test inputs).
+Deterministic corpus runner that loads ARC JSON and emits receipts.
+
+Modes:
+  - pi-receipts: Π receipts for training outputs (WO-2)
+  - free-simple-receipts: Simple FREE verifiers (WO-3A)
 
 CLI:
   python -m arc.solve --mode pi-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
+  python -m arc.solve --mode free-simple-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
 """
 
 import argparse
@@ -18,6 +22,7 @@ import numpy as np
 
 from arc.pi import types_from_output, codebook_hash, compute_partition_sizes
 from arc.receipts import sha256_ndarray, write_jsonl
+from arc.free_simple import verify_simple_free, get_detailed_checks
 
 
 def load_tasks_from_json(path: Path) -> Dict[str, Dict[str, Any]]:
@@ -170,6 +175,75 @@ def _compute_pi_receipt(
     }
 
 
+def run_free_simple_receipts(
+    tasks: Dict[str, Dict[str, Any]],
+    out_path: Path,
+) -> None:
+    """
+    Run WO-3A simple FREE verifiers mode.
+
+    For each task:
+      - Process each training pair (X->Y)
+      - Verify simple FREE candidates at color level
+      - Write one record per pair + one union record per task
+
+    Args:
+        tasks: Dict mapping task_id -> task data
+        out_path: Output path for receipts JSONL file
+    """
+    receipts: List[Dict[str, Any]] = []
+
+    # Counters for summary
+    total_tasks = len(tasks)
+    total_pairs = 0
+
+    for task_id, task_data in tasks.items():
+        train_pairs = task_data.get("train", [])
+        task_union_kinds: List[str] = []
+
+        # Process each training pair
+        for pair_index, pair in enumerate(train_pairs):
+            X = np.array(pair["input"], dtype=np.int32)
+            Y = np.array(pair["output"], dtype=np.int32)
+
+            # Verify simple FREE candidates
+            candidates = verify_simple_free(X, Y)
+
+            # Get detailed checks for receipt
+            detailed_checks = get_detailed_checks(X, Y)
+
+            # Build per-pair receipt
+            pair_receipt = {
+                "task_id": task_id,
+                "pair_index": pair_index,
+                "free_simple": detailed_checks,
+                "candidates": [[kind, params] for kind, params in candidates],
+            }
+
+            receipts.append(pair_receipt)
+            total_pairs += 1
+
+            # Collect unique kinds for task union
+            for kind, _ in candidates:
+                if kind not in task_union_kinds:
+                    task_union_kinds.append(kind)
+
+        # After all pairs, add task-level union record
+        task_union_receipt = {
+            "task_id": task_id,
+            "free_simple_union": task_union_kinds,
+        }
+        receipts.append(task_union_receipt)
+
+    # Write all receipts to JSONL
+    write_jsonl(out_path, receipts)
+
+    # Log summary
+    logging.info(
+        f"Processed tasks={total_tasks}, pairs={total_pairs}"
+    )
+
+
 def main() -> None:
     """CLI entry point with argparse."""
     # Configure logging (single INFO line per WO-2)
@@ -187,8 +261,8 @@ def main() -> None:
         "--mode",
         type=str,
         required=True,
-        choices=["pi-receipts"],
-        help="Solver mode (currently only pi-receipts)",
+        choices=["pi-receipts", "free-simple-receipts"],
+        help="Solver mode: pi-receipts (WO-2) or free-simple-receipts (WO-3A)",
     )
 
     parser.add_argument(
@@ -226,6 +300,11 @@ def main() -> None:
             tasks=tasks,
             out_path=args.out,
             include_test_pi=args.include_test_pi,
+        )
+    elif args.mode == "free-simple-receipts":
+        run_free_simple_receipts(
+            tasks=tasks,
+            out_path=args.out,
         )
 
 

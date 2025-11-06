@@ -1,18 +1,13 @@
 now let's expand this wo. so now tell me what kinds of "mature, well-documented Python libraries for every primitive we need" can be reused for
-## WO-3A — FREE Verifiers: Identity / Mirror-Concat / V-Double / Concat-Dup
+## WO-3B — FREE Verifier: Types-Periodic Tile
 
-**Goal:** Per training pair, verify “simple” terminals exactly (color-level equality where defined).
+**Goal:** Detect integer blow-up by **types** periodicity (FREE).
 
-* **Scope:**
-
-  * `identity` (shape equal),
-  * `h-mirror-concat` (rev|id, id|rev),
-  * `v-double`,
-  * `h-concat-dup`, `v-concat-dup`.
+* **Scope:** Verify `tile (sh,sw)` by checking `T_Y[r,c] == T_Y[r%H, c%W]`.
 * **Libs:** `numpy`
-* **IO:** `verify_simple_free(X,Y) -> List[(kind, params)]` per pair.
-* **Receipts:** for each pair, emit the candidate set; for each task, union of per-pair candidates.
-* **Pass criteria:** Runs on all 1000; no heuristics; receipts list exactly what matched.
+* **IO:** `verify_tile_types(X,Y,T_Y) -> Optional(("tile",(sh,sw)))`
+* **Receipts:** record `(sh,sw)` and a boolean “types periodicity” proof.
+* **Pass criteria:** No false positives on corpus; receipts present when true.
 
 now here are the things u must take care of:
 1. now thr is nothing called underspecificy in dev. instead  we shud be ovespecific. but anything that u r specifying must be STRICTLY grounded in our anchor docs we created.
