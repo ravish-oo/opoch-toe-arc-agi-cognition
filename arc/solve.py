@@ -1,5 +1,5 @@
 """
-Harness + Receipts Runner (WO-2, WO-3A, WO-3B, WO-3C, WO-3D, WO-4)
+Harness + Receipts Runner (WO-2, WO-3A, WO-3B, WO-3C, WO-3D, WO-4, WO-5)
 
 Deterministic corpus runner that loads ARC JSON and emits receipts.
 
@@ -10,6 +10,7 @@ Modes:
   - free-sbs-y-receipts: SBS-Y verifier on types (WO-3C)
   - free-sbs-param-receipts: SBS-Param verifier on types (WO-3D)
   - free-intersect-pick: FREE intersection and pick with frozen order (WO-4)
+  - transport-receipts: Transport types + disjointify (WO-5)
 
 CLI:
   python -m arc.solve --mode pi-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
@@ -18,13 +19,14 @@ CLI:
   python -m arc.solve --mode free-sbs-y-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
   python -m arc.solve --mode free-sbs-param-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
   python -m arc.solve --mode free-intersect-pick --challenges path/to/tasks.json --out outputs/receipts.jsonl
+  python -m arc.solve --mode transport-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
 """
 
 import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
@@ -40,6 +42,9 @@ from arc.free_sbs import (
 )
 from arc.free_prove import (
     prove_free, compute_chosen_sha256
+)
+from arc.transport import (
+    transport_types, disjointify, verify_blocks_match
 )
 
 
@@ -576,6 +581,243 @@ def run_free_intersect_pick(
     )
 
 
+def run_transport_receipts(
+    tasks: Dict[str, Dict[str, Any]],
+    out_path: Path,
+) -> None:
+    """
+    Run WO-5 transport types + disjointify mode.
+
+    For each FREE_PROVEN task from WO-4:
+      - Load proven terminal
+      - Reconstruct SBS templates if needed
+      - Transport T_Y0 to T_test
+      - Disjointify if needed
+      - Write receipt with pre/post disjoint stats
+
+    Args:
+        tasks: Dict mapping task_id -> task data
+        out_path: Output path for receipts JSONL file
+    """
+    receipts: List[Dict[str, Any]] = []
+
+    # Load WO-4 receipts to get proven terminals
+    wo4_path = Path("outputs/receipts_wo4.jsonl")
+    if not wo4_path.exists():
+        logging.error(f"WO-4 receipts not found: {wo4_path}")
+        raise SystemExit(1)
+
+    wo4_receipts = {}
+    with open(wo4_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            rec = json.loads(line)
+            wo4_receipts[rec["task_id"]] = rec
+
+    # Counters for summary
+    total_tasks = len(tasks)
+    processed_count = 0
+    skipped_unproven = 0
+
+    for task_id, task_data in tasks.items():
+        # Get WO-4 result
+        if task_id not in wo4_receipts:
+            continue
+
+        wo4_rec = wo4_receipts[task_id]
+        free_inter = wo4_rec["free_intersection"]
+
+        # Skip unproven tasks
+        if "chosen" not in free_inter:
+            skipped_unproven += 1
+            continue
+
+        chosen = free_inter["chosen"]
+        kind, params = chosen[0], chosen[1]
+
+        # Get training pair 0
+        train_pairs = task_data.get("train", [])
+        if len(train_pairs) == 0:
+            continue
+
+        X0 = np.array(train_pairs[0]["input"], dtype=np.int32)
+        Y0 = np.array(train_pairs[0]["output"], dtype=np.int32)
+        T_Y0, _ = types_from_output(Y0)
+
+        # Get test input (use first test case)
+        test_cases = task_data.get("test", [])
+        if len(test_cases) == 0:
+            continue
+
+        X_test = np.array(test_cases[0]["input"], dtype=np.int32)
+
+        # Reconstruct SBS templates if needed
+        templates = None
+        if kind in ["SBS-Y", "SBS-param"]:
+            templates = _reconstruct_sbs_templates(kind, X0, Y0, T_Y0, params)
+
+        # Build free_tuple for transport
+        if templates is not None:
+            # Unpack original params and add templates
+            sh, sw = params[0], params[1]
+            sigma_table = params[2] if len(params) > 2 else {}
+            free_tuple = (kind, (sh, sw, sigma_table, templates))
+        else:
+            free_tuple = (kind, params)
+
+        # Transport types (without disjointify first for receipt stats)
+        if kind == "identity":
+            T_test_before = T_Y0.copy()
+        elif kind in ["tile", "SBS-Y", "SBS-param"]:
+            # Need to track before disjointify
+            from arc.transport import _transport_tile, _transport_sbs
+            if kind == "tile":
+                T_test_before = _transport_tile(T_Y0, params)
+            else:
+                T_test_before = _transport_sbs(T_Y0, free_tuple[1], X_test, kind)
+        else:
+            # Other terminals don't need special pre-disjoint tracking
+            T_test_before = None
+
+        # Full transport with disjointify
+        T_test = transport_types(T_Y0, free_tuple, X_test.shape, X_test)
+
+        # Compute pre/post disjoint stats
+        if T_test_before is not None:
+            pre_unique = len(np.unique(T_test_before))
+            post_unique = len(np.unique(T_test))
+        else:
+            pre_unique = len(np.unique(T_Y0))
+            post_unique = len(np.unique(T_test))
+
+        # Build block evidence for tile/SBS
+        block_evidence = None
+        if kind in ["tile", "SBS-Y", "SBS-param"] and T_test_before is not None:
+            H, W = X_test.shape
+            if kind == "tile":
+                sh, sw = params
+                blocks_match = True  # Always true for tile
+            else:
+                sh, sw = free_tuple[1][0], free_tuple[1][1]
+                sigma_table = free_tuple[1][2]
+                blocks_match = verify_blocks_match(T_test_before, templates, X_test, sigma_table, sh, sw)
+
+            block_evidence = {
+                "grid": [H, W],
+                "sh": sh,
+                "sw": sw,
+                "blocks_match": blocks_match
+            }
+
+        # Build receipt
+        task_receipt = {
+            "task_id": task_id,
+            "transport": {
+                "terminal": [kind, params],
+                "in_shape": list(T_Y0.shape),
+                "test_shape": list(T_test.shape),
+                "pre_disjoint": {
+                    "unique_type_ids": int(pre_unique)
+                },
+                "post_disjoint": {
+                    "unique_type_ids": int(post_unique),
+                    "components_labeled": True
+                }
+            }
+        }
+
+        if block_evidence is not None:
+            task_receipt["transport"]["block_evidence"] = block_evidence
+
+        receipts.append(task_receipt)
+        processed_count += 1
+
+    # Write all receipts to JSONL
+    write_jsonl(out_path, receipts)
+
+    # Log summary
+    logging.info(
+        f"Processed tasks={total_tasks}, transported={processed_count}, skipped_unproven={skipped_unproven}"
+    )
+
+
+def _reconstruct_sbs_templates(
+    kind: str,
+    X0: np.ndarray,
+    Y0: np.ndarray,
+    T_Y0: np.ndarray,
+    params: Tuple[Any, ...]
+) -> Dict[int, np.ndarray]:
+    """
+    Reconstruct SBS templates from training data.
+
+    For SBS-Y: extract (sh×sw) blocks from partitioned T_Y0
+    For SBS-param: create constant (sh×sw) blocks from T_X0
+
+    Args:
+        kind: "SBS-Y" or "SBS-param"
+        X0: Training input
+        Y0: Training output
+        T_Y0: Training output types Π(Y0)
+        params: (sh, sw, sigma_table, ...)
+
+    Returns:
+        Dict mapping template_id -> (sh, sw) type array
+    """
+    sh, sw = params[0], params[1]
+    sigma_table = params[2] if len(params) > 2 else {}
+
+    H, W = X0.shape
+    h, w = T_Y0.shape
+
+    # Check dimensions
+    if h != sh * H or w != sw * W:
+        return {}
+
+    templates = {}
+
+    if kind == "SBS-Y":
+        # Partition T_Y0 into blocks
+        blocks = T_Y0.reshape(H, sh, W, sw)
+        blocks = np.moveaxis(blocks, 1, 2)
+
+        # Extract template for each palette value
+        for v, tid in sigma_table.items():
+            # Find first occurrence of v in X0
+            first_i, first_j = None, None
+            for i in range(H):
+                for j in range(W):
+                    if X0[i, j] == v:
+                        first_i, first_j = i, j
+                        break
+                if first_i is not None:
+                    break
+
+            if first_i is not None:
+                templates[tid] = blocks[first_i, first_j].copy()
+
+    elif kind == "SBS-param":
+        # Get T_X0
+        T_X0, _ = types_from_output(X0)
+
+        # Build constant templates from T_X0
+        for v, tid in sigma_table.items():
+            # Find first occurrence of v in X0
+            first_i, first_j = None, None
+            for i in range(H):
+                for j in range(W):
+                    if X0[i, j] == v:
+                        first_i, first_j = i, j
+                        break
+                if first_i is not None:
+                    break
+
+            if first_i is not None:
+                # Constant template filled with T_X0 type
+                templates[tid] = np.full((sh, sw), T_X0[first_i, first_j], dtype=T_X0.dtype)
+
+    return templates
+
+
 def main() -> None:
     """CLI entry point with argparse."""
     # Configure logging (single INFO line per WO-2)
@@ -593,8 +835,8 @@ def main() -> None:
         "--mode",
         type=str,
         required=True,
-        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts", "free-sbs-param-receipts", "free-intersect-pick"],
-        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), free-sbs-y-receipts (WO-3C), free-sbs-param-receipts (WO-3D), or free-intersect-pick (WO-4)",
+        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts", "free-sbs-param-receipts", "free-intersect-pick", "transport-receipts"],
+        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), free-sbs-y-receipts (WO-3C), free-sbs-param-receipts (WO-3D), free-intersect-pick (WO-4), or transport-receipts (WO-5)",
     )
 
     parser.add_argument(
@@ -655,6 +897,11 @@ def main() -> None:
         )
     elif args.mode == "free-intersect-pick":
         run_free_intersect_pick(
+            tasks=tasks,
+            out_path=args.out,
+        )
+    elif args.mode == "transport-receipts":
+        run_transport_receipts(
             tasks=tasks,
             out_path=args.out,
         )

@@ -1,13 +1,13 @@
 now let's expand this wo. so now tell me what kinds of "mature, well-documented Python libraries for every primitive we need" can be reused for
-## WO-5 — Transport Types + Disjointify
+## WO-6 — Quotas K (Paid) + Y₀ Selection
 
-**Goal:** Build the **test** type mosaic exactly as the proven FREE map dictates; keep copies disjoint.
+**Goal:** Count per-type color quotas from one training output; deterministic Y₀ policy.
 
-* **Scope:** Implement transport for terminals from WO-3/4: identity, mirror-concat, v-double, concat-dup, tile, SBS-Y, SBS-param. Then disjointify (connected-component relabel) so fills don’t bleed.
-* **Libs:** `numpy`, `skimage.measure.label` (4-conn) or simple DFS
-* **IO:** `transport_types(T_train, free_tuple, X_test_shape, X*, Y0) -> T_test`
-* **Receipts:** output shape; per-block template hash match; pre/post disjoint type counts.
-* **Pass criteria:** All FREE_PROVEN tasks pass shape checks and block template matches.
+* **Scope:** Select Y₀ whose non-zero palette matches the test’s, tie-break lexicographically, else first. Compute K on Π(Y₀). (Type alignment across Y_i not required in v0.)
+* **Libs:** `numpy`
+* **IO:** `choose_Y0(task) -> Y0_idx`, `quotas(Y0, T0, C) -> K`
+* **Receipts:** Y₀ selection reason; per-type K with ∑K==|S|; palette report.
+* **Pass criteria:** All tasks produce valid K; no quotas from inputs.
 
 now here are the things u must take care of:
 1. now thr is nothing called underspecificy in dev. instead  we shud be ovespecific. but anything that u r specifying must be STRICTLY grounded in our anchor docs we created.

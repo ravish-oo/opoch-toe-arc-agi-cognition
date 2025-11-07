@@ -1,0 +1,282 @@
+"""
+WO-5: Transport Types + Disjointify
+
+Given a proven FREE terminal from WO-4, transport training output types (T_Y0)
+to create test output types (T_test), then disjointify to ensure fills cannot
+bleed across replicated blocks.
+
+All operations work on TYPES (from Π), never colors.
+
+Transport terminals:
+  - identity: T_test = T_Y0
+  - h-mirror-concat: horizontal mirror concatenation
+  - v-double: vertical duplication
+  - h/v-concat-dup: horizontal/vertical duplication
+  - tile: integer blow-up
+  - SBS-Y: selector-driven block substitution from Π(Y) templates
+  - SBS-param: selector-driven block substitution from Π(X) templates
+
+Disjointify: 4-connected component labeling per type ID to prevent fills
+from bleeding across replicated blocks.
+"""
+
+from typing import Any, Dict, Optional, Tuple
+
+import numpy as np
+from skimage.measure import label as skimage_label
+
+
+def transport_types(
+    T_train: np.ndarray,
+    free_tuple: Tuple[str, Tuple[Any, ...]],
+    X_test_shape: Tuple[int, int],
+    X_test: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    Build T_test per the proven FREE terminal (types-only), then disjointify.
+
+    Args:
+        T_train: Training output type mosaic Π(Y0), shape (h0, w0)
+        free_tuple: (kind, params) from WO-4, e.g., ("tile", (sh, sw))
+        X_test_shape: Test input shape (H, W)
+        X_test: Test input (needed for SBS-* selection only)
+
+    Returns:
+        T_test: Test output type mosaic (np.ndarray[int]), shape determined by FREE map
+    """
+    kind, params = free_tuple
+
+    # Apply FREE morphism (types only, no colors)
+    if kind == "identity":
+        T_test = _transport_identity(T_train)
+    elif kind == "h-mirror-concat":
+        T_test = _transport_h_mirror_concat(T_train, params)
+    elif kind == "v-double":
+        T_test = _transport_v_double(T_train)
+    elif kind == "h-concat-dup":
+        T_test = _transport_h_concat_dup(T_train)
+    elif kind == "v-concat-dup":
+        T_test = _transport_v_concat_dup(T_train)
+    elif kind == "tile":
+        T_test = _transport_tile(T_train, params)
+    elif kind == "SBS-Y":
+        T_test = _transport_sbs(T_train, params, X_test, kind="SBS-Y")
+    elif kind == "SBS-param":
+        T_test = _transport_sbs(T_train, params, X_test, kind="SBS-param")
+    else:
+        raise ValueError(f"Unknown FREE kind: {kind}")
+
+    # Disjointify if terminal involves replication
+    if _needs_disjointify(kind):
+        T_test = disjointify(T_test)
+
+    return T_test
+
+
+def _needs_disjointify(kind: str) -> bool:
+    """Check if terminal needs disjointification."""
+    # Identity doesn't replicate, so no disjointify needed
+    return kind != "identity"
+
+
+def _transport_identity(T_train: np.ndarray) -> np.ndarray:
+    """Identity: T_test = T_train (copy)."""
+    return T_train.copy()
+
+
+def _transport_h_mirror_concat(T_train: np.ndarray, params: Tuple[Any, ...]) -> np.ndarray:
+    """
+    Horizontal mirror concatenation.
+
+    Two variants:
+      - "rev|id": [fliplr(T_train) | T_train]
+      - "id|rev": [T_train | fliplr(T_train)]
+    """
+    variant = params[0] if params else "id|rev"
+    T_flip = np.fliplr(T_train)
+
+    if variant == "rev|id":
+        return np.concatenate([T_flip, T_train], axis=1)
+    else:  # "id|rev"
+        return np.concatenate([T_train, T_flip], axis=1)
+
+
+def _transport_v_double(T_train: np.ndarray) -> np.ndarray:
+    """Vertical double: [T_train; T_train]."""
+    return np.concatenate([T_train, T_train], axis=0)
+
+
+def _transport_h_concat_dup(T_train: np.ndarray) -> np.ndarray:
+    """Horizontal concatenation duplicate: [T_train | T_train]."""
+    return np.concatenate([T_train, T_train], axis=1)
+
+
+def _transport_v_concat_dup(T_train: np.ndarray) -> np.ndarray:
+    """Vertical concatenation duplicate: [T_train; T_train]."""
+    return np.concatenate([T_train, T_train], axis=0)
+
+
+def _transport_tile(T_train: np.ndarray, params: Tuple[int, int]) -> np.ndarray:
+    """
+    Tile (integer blow-up): repeat T_train by (sh, sw).
+
+    Args:
+        T_train: Base type pattern
+        params: (sh, sw) - repetition factors
+
+    Returns:
+        Tiled type mosaic of shape (sh*h, sw*w)
+    """
+    sh, sw = params
+    return np.tile(T_train, (sh, sw))
+
+
+def _transport_sbs(
+    T_train: np.ndarray,
+    params: Tuple[Any, ...],
+    X_test: np.ndarray,
+    kind: str
+) -> np.ndarray:
+    """
+    SBS (Selector-driven Block Substitution).
+
+    For SBS-Y: templates from Π(Y)
+    For SBS-param: templates from Π(X)
+
+    Args:
+        T_train: Training output types (used for templates in SBS-Y)
+        params: (sh, sw, sigma_table, template_dict) where template_dict maps tid -> (sh, sw) array
+        X_test: Test input for selector
+        kind: "SBS-Y" or "SBS-param"
+
+    Returns:
+        T_test with templates placed according to X_test selector
+    """
+    if len(params) < 3:
+        raise ValueError(f"SBS params must include (sh, sw, sigma_table, templates): got {params}")
+
+    sh, sw = params[0], params[1]
+    sigma_table = params[2]
+    templates = params[3] if len(params) > 3 else {}
+
+    H, W = X_test.shape
+    h, w = H * sh, W * sw
+
+    # Build empty test canvas
+    T_test = np.zeros((h, w), dtype=np.int32)
+
+    # Place templates according to X_test selector
+    for i in range(H):
+        for j in range(W):
+            v = int(X_test[i, j])
+
+            # Lookup template ID from sigma
+            if v not in sigma_table:
+                # Value not in sigma table - use default (zeros)
+                continue
+
+            tid = sigma_table[v]
+
+            if tid not in templates:
+                # Template not provided - use zeros
+                continue
+
+            # Place template into block
+            r0, r1 = i * sh, (i + 1) * sh
+            c0, c1 = j * sw, (j + 1) * sw
+            T_test[r0:r1, c0:c1] = templates[tid]
+
+    return T_test
+
+
+def disjointify(T: np.ndarray) -> np.ndarray:
+    """
+    Disjointify: 4-connected component labeling per original type ID.
+
+    After replication (tile, dup, mirror, SBS), split each type ID into
+    separate components to prevent fills from bleeding across block boundaries.
+
+    Args:
+        T: Type mosaic with replicated blocks
+
+    Returns:
+        T_disjoint: Type mosaic with 4-connected components labeled uniquely
+    """
+    T = np.asarray(T, dtype=np.int32)
+    h, w = T.shape
+
+    # Find unique type IDs
+    unique_types = np.unique(T)
+
+    # Build new type mosaic with disjoint labels
+    T_disjoint = np.zeros_like(T)
+    next_global_id = 0
+
+    # Process each original type ID
+    for type_id in unique_types:
+        # Isolate this type
+        mask = (T == type_id).astype(np.uint8)
+
+        # 4-connected component labeling
+        labels = skimage_label(mask, connectivity=1)
+
+        # Get unique component labels (exclude 0 = background)
+        component_ids = np.unique(labels)
+        component_ids = component_ids[component_ids > 0]
+
+        # Assign new global IDs to each component
+        for comp_id in component_ids:
+            comp_mask = (labels == comp_id)
+            T_disjoint[comp_mask] = next_global_id
+            next_global_id += 1
+
+    return T_disjoint
+
+
+def verify_blocks_match(
+    T_test: np.ndarray,
+    templates: Dict[int, np.ndarray],
+    X_test: np.ndarray,
+    sigma_table: Dict[int, int],
+    sh: int,
+    sw: int
+) -> bool:
+    """
+    Verify that every block in T_test matches its template.
+
+    Used for receipt generation to prove correctness before disjointify.
+
+    Args:
+        T_test: Test type mosaic before disjointify
+        templates: Template dict {tid -> (sh, sw) array}
+        X_test: Test input for selector
+        sigma_table: Selector mapping {value -> tid}
+        sh, sw: Block dimensions
+
+    Returns:
+        True if all blocks match their templates exactly
+    """
+    H, W = X_test.shape
+
+    for i in range(H):
+        for j in range(W):
+            v = int(X_test[i, j])
+
+            if v not in sigma_table:
+                continue
+
+            tid = sigma_table[v]
+
+            if tid not in templates:
+                continue
+
+            # Extract block
+            r0, r1 = i * sh, (i + 1) * sh
+            c0, c1 = j * sw, (j + 1) * sw
+            block = T_test[r0:r1, c0:c1]
+
+            # Check exact equality
+            if not np.array_equal(block, templates[tid]):
+                return False
+
+    return True
