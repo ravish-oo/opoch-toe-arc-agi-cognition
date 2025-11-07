@@ -52,6 +52,12 @@ from arc.transport import (
     transport_types, disjointify, verify_blocks_match
 )
 from arc.quotas import generate_quotas_receipt, choose_Y0, quotas
+from arc.quotas_meet import (
+    build_phi_key_index,
+    quotas_meet_all,
+    quotas_for_test_parent,
+    generate_quotas_meet_receipt,
+)
 from arc.fill import fill_by_rank, generate_fill_receipt, idempotence_check
 
 
@@ -1131,14 +1137,17 @@ def _collect_per_pair_candidates(task: Dict[str, Any]) -> Tuple:
 
 
 def run_v0(tasks: Dict[str, Dict[str, Any]], pred_path: Path, receipts_path: Path,
-           report_path: Path, with_gt: bool = False, gt_path: Path = None) -> None:
+           report_path: Path, policy: str = "single", with_gt: bool = False, gt_path: Path = None) -> None:
     """
     WO-8: End-to-end v0 runner (thin orchestration only).
 
-    Chains WO-4 → WO-6 → WO-5 → WO-7 without re-implementing any WO logic.
+    Chains WO-4 → WO-6/WO-6b → WO-5 → WO-7 without re-implementing any WO logic.
+
+    Args:
+        policy: "single" (WO-6, single Y0) or "meet" (WO-6b, multi-Y meet)
     """
     predictions = []
-    triages = []
+    receipts = []
     terminal_counts = {}
 
     if with_gt and gt_path:
@@ -1153,29 +1162,56 @@ def run_v0(tasks: Dict[str, Dict[str, Any]], pred_path: Path, receipts_path: Pat
         candidates = _collect_per_pair_candidates(task)
         status4, payload4 = prove_free(task, *candidates)
         if status4 == "FREE_UNPROVEN":
-            triages.append({"task_id": task_id, "triage": {"status": "SKIPPED", "reason": "FREE_UNPROVEN"}})
+            receipts.append({"task_id": task_id, "triage": {"status": "SKIPPED", "reason": "FREE_UNPROVEN"}})
             continue
 
         chosen = payload4["chosen"]
         free_tuple = chosen  # Already in (kind, params) format from prove_free
         terminal_counts[chosen[0]] = terminal_counts.get(chosen[0], 0) + 1
 
-        # WO-6: choose Y₀ and quotas
+        # WO-6 / WO-6b: quotas (policy-dependent)
         y0_index = choose_Y0(task)
         Y0 = np.array(task["train"][y0_index]["output"], dtype=np.int32)
         T_Y0, _ = types_from_output(Y0)
-        K = quotas(Y0, T_Y0, C=10)
 
-        # WO-5: transport types
+        # WO-5: transport types (need this before quotas for meet policy)
         X_test = np.array(task["test"][0]["input"], dtype=np.int32)
         T_test, parent_of = transport_types(T_Y0, free_tuple, X_test.shape, X_test)
+
+        # Compute quotas based on policy
+        if policy == "meet":
+            # WO-6b: Multi-Y meet quotas with admissibility check and fallback
+            K_star_phi = quotas_meet_all(task["train"], C=10)
+            parent_phi_map = build_phi_key_index(Y0, T_Y0)
+
+            # Compute Y0 quotas (fallback when meet inadmissible)
+            Y0_quotas = quotas(Y0, T_Y0, C=10)
+
+            # Compute parent block sizes (for admissibility check: sum(K*) == |S|)
+            parent_sizes = {}
+            for parent_id in np.unique(T_Y0).tolist():
+                parent_sizes[parent_id] = int(np.sum(T_Y0 == parent_id))
+
+            # Adapt meet quotas to test with admissibility check
+            K, phi_metadata = quotas_for_test_parent(
+                parent_of, parent_phi_map, K_star_phi, parent_sizes, Y0_quotas
+            )
+        else:
+            # WO-6: Single Y₀ quotas
+            K = quotas(Y0, T_Y0, C=10)
+            phi_metadata = {}  # Not used in single-Y policy
 
         # WO-7: fill + idempotence
         Y_star = fill_by_rank(T_test, parent_of, K, C=10)
         idempotent = idempotence_check(Y_star, C=10)
 
-        # Generate WO-6 and WO-7 receipts to check for IMPLEMENTATION failures
-        quotas_receipt = generate_quotas_receipt(task, task_id)
+        # Generate WO-6/WO-6b and WO-7 receipts to check for IMPLEMENTATION failures
+        if policy == "meet":
+            quotas_receipt = generate_quotas_meet_receipt(
+                task_id, task, K_star_phi, parent_phi_map, K, T_test, parent_of, phi_metadata, C=10
+            )
+        else:
+            quotas_receipt = generate_quotas_receipt(task, task_id)
         fill_receipt = generate_fill_receipt(task_id, T_test, parent_of, K, Y_star, C=10)
 
         # Check receipts for failures
@@ -1190,6 +1226,13 @@ def run_v0(tasks: Dict[str, Dict[str, Any]], pred_path: Path, receipts_path: Pat
 
         # Write prediction
         predictions.append({"id": task_id, "output": Y_star.tolist(), "sha256": sha256_pred})
+
+        # Build full receipt with detailed WO-6/WO-6b and WO-7 receipts
+        receipt = {
+            "task_id": task_id,
+            "quotas": quotas_receipt.get("quotas") if policy == "single" else quotas_receipt.get("quotas_meet"),
+            "fill": fill_receipt["fill"]
+        }
 
         # Triage (if GT available)
         if with_gt and task_id in gt_tasks:
@@ -1216,22 +1259,26 @@ def run_v0(tasks: Dict[str, Dict[str, Any]], pred_path: Path, receipts_path: Pat
 
             triage.update({"free_chosen": chosen, "gt_free": gt_free if 'gt_free' in locals() else chosen,
                            "sha256_prediction": sha256_pred, "sha256_gt": sha256_gt})
-            triages.append({"task_id": task_id, "triage": triage})
+            receipt["triage"] = triage
+
+        receipts.append(receipt)
 
     # Write outputs
     with open(pred_path, "w") as f:
         json.dump(predictions, f, indent=2)
 
-    write_jsonl(receipts_path, triages)
+    write_jsonl(receipts_path, receipts)
 
     # Report
     counts = {"MATCH": 0, "MISMATCH": 0, "SKIPPED": 0}
     mismatch_breakdown = {"IMPLEMENTATION": 0, "POLICY": 0, "FREE_DIFFERS": 0}
-    for t in triages:
-        status = t["triage"]["status"]
+    for r in receipts:
+        if "triage" not in r:
+            continue  # Skip receipts without triage (no GT)
+        status = r["triage"]["status"]
         counts[status] = counts.get(status, 0) + 1
         if status == "MISMATCH":
-            reason = t["triage"].get("reason", "UNKNOWN")
+            reason = r["triage"].get("reason", "UNKNOWN")
             mismatch_breakdown[reason] = mismatch_breakdown.get(reason, 0) + 1
 
     report = [
@@ -1328,6 +1375,15 @@ def main() -> None:
         help="Path to ground truth solutions JSON (v0 mode)",
     )
 
+    # WO-6b policy argument
+    parser.add_argument(
+        "--policy",
+        type=str,
+        choices=["single", "meet"],
+        default="single",
+        help="Quotas policy: 'single' (WO-6, single Y0) or 'meet' (WO-6b, multi-Y meet)",
+    )
+
     # WO-8 audit mode arguments
     parser.add_argument(
         "--id",
@@ -1400,6 +1456,7 @@ def main() -> None:
             pred_path=args.pred,
             receipts_path=args.receipts,
             report_path=args.report,
+            policy=args.policy,
             with_gt=args.with_gt,
             gt_path=args.gt,
         )
