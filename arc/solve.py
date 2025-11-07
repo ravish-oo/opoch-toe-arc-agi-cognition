@@ -668,33 +668,38 @@ def run_transport_receipts(
             free_tuple = (kind, params)
 
         # Transport types (without disjointify first for receipt stats)
+        from arc.transport import (_transport_identity, _transport_h_mirror_concat,
+                                     _transport_v_double, _transport_h_concat_dup,
+                                     _transport_v_concat_dup, _transport_tile, _transport_sbs)
+
         if kind == "identity":
-            T_test_before = T_Y0.copy()
-        elif kind in ["tile", "SBS-Y", "SBS-param"]:
-            # Need to track before disjointify
-            from arc.transport import _transport_tile, _transport_sbs
-            if kind == "tile":
-                T_test_before = _transport_tile(T_Y0, params)
-            else:
-                T_test_before = _transport_sbs(T_Y0, free_tuple[1], X_test, kind)
+            T_test_before = _transport_identity(T_Y0)
+        elif kind == "h-mirror-concat":
+            T_test_before = _transport_h_mirror_concat(T_Y0, params)
+        elif kind == "v-double":
+            T_test_before = _transport_v_double(T_Y0)
+        elif kind == "h-concat-dup":
+            T_test_before = _transport_h_concat_dup(T_Y0)
+        elif kind == "v-concat-dup":
+            T_test_before = _transport_v_concat_dup(T_Y0)
+        elif kind == "tile":
+            T_test_before = _transport_tile(T_Y0, params)
+        elif kind in ["SBS-Y", "SBS-param"]:
+            T_test_before = _transport_sbs(T_Y0, free_tuple[1], X_test, kind)
         else:
-            # Other terminals don't need special pre-disjoint tracking
-            T_test_before = None
+            T_test_before = T_Y0.copy()
 
         # Full transport with disjointify
-        T_test = transport_types(T_Y0, free_tuple, X_test.shape, X_test)
+        T_test, parent_of = transport_types(T_Y0, free_tuple, X_test.shape, X_test)
 
         # Compute pre/post disjoint stats
-        if T_test_before is not None:
-            pre_unique = len(np.unique(T_test_before))
-            post_unique = len(np.unique(T_test))
-        else:
-            pre_unique = len(np.unique(T_Y0))
-            post_unique = len(np.unique(T_test))
+        T_pre = T_test_before
+        pre_unique = len(np.unique(T_pre))
+        post_unique = len(np.unique(T_test))
 
         # Build block evidence for tile/SBS
         block_evidence = None
-        if kind in ["tile", "SBS-Y", "SBS-param"] and T_test_before is not None:
+        if kind in ["tile", "SBS-Y", "SBS-param"]:
             H, W = X_test.shape
             if kind == "tile":
                 sh, sw = params
@@ -711,6 +716,39 @@ def run_transport_receipts(
                 "blocks_match": blocks_match
             }
 
+        # Verify disjointify mapping
+        parent_consistency_pass = True
+        counts_conserved_pass = True
+
+        # Check parent consistency: all pixels in S' came from parent S
+        for new_id, parent_id in parent_of.items():
+            idx = np.flatnonzero(T_test.ravel() == new_id)
+            if len(idx) > 0:
+                if not np.all(T_pre.ravel()[idx] == parent_id):
+                    parent_consistency_pass = False
+                    break
+
+        # Check counts conserved: sum of children == parent size
+        parent_sizes = {}
+        child_sizes = {}
+
+        for parent_id in np.unique(T_pre):
+            parent_sizes[int(parent_id)] = int(np.count_nonzero(T_pre == parent_id))
+
+        for new_id, parent_id in parent_of.items():
+            child_sizes.setdefault(parent_id, 0)
+            child_sizes[parent_id] += int(np.count_nonzero(T_test == new_id))
+
+        for parent_id, expected_size in parent_sizes.items():
+            actual_size = child_sizes.get(parent_id, 0)
+            if actual_size != expected_size:
+                counts_conserved_pass = False
+                break
+
+        # Build parent_map samples (first 3 mappings)
+        parent_map_samples = [[str(new_id), str(parent_id)]
+                              for new_id, parent_id in list(parent_of.items())[:3]]
+
         # Build receipt
         task_receipt = {
             "task_id": task_id,
@@ -725,6 +763,20 @@ def run_transport_receipts(
                     "unique_type_ids": int(post_unique),
                     "components_labeled": True
                 }
+            },
+            "disjointify": {
+                "pre": {
+                    "unique_types": int(pre_unique)
+                },
+                "post": {
+                    "unique_types": int(post_unique)
+                },
+                "parent_map": {
+                    "size": len(parent_of),
+                    "samples": parent_map_samples
+                },
+                "parent_consistency_pass": parent_consistency_pass,
+                "counts_conserved_pass": counts_conserved_pass
             }
         }
 

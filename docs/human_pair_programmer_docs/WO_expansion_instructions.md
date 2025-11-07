@@ -1,13 +1,13 @@
 now let's expand this wo. so now tell me what kinds of "mature, well-documented Python libraries for every primitive we need" can be reused for
-## WO-6 — Quotas K (Paid) + Y₀ Selection
+## WO-7 — Fill by Rank + Idempotence
 
-**Goal:** Count per-type color quotas from one training output; deterministic Y₀ policy.
+**Goal:** Produce (Y^*) via the meet rule and certify fixed-point behavior.
 
-* **Scope:** Select Y₀ whose non-zero palette matches the test’s, tie-break lexicographically, else first. Compute K on Π(Y₀). (Type alignment across Y_i not required in v0.)
+* **Scope:** Row-major ranks within each transported type; cumulative cuts Σ; assign smallest c with rank ≤ Σ(c); recompute Π/K on (Y^*), re-fill to confirm idempotence.
 * **Libs:** `numpy`
-* **IO:** `choose_Y0(task) -> Y0_idx`, `quotas(Y0, T0, C) -> K`
-* **Receipts:** Y₀ selection reason; per-type K with ∑K==|S|; palette report.
-* **Pass criteria:** All tasks produce valid K; no quotas from inputs.
+* **IO:** `fill_by_rank(T_test, K, C) -> Y*`
+* **Receipts:** quota satisfaction per type (counts match K); per-rank minimality; idempotence true; SHA256(Y*).
+* **Pass criteria:** All FREE_PROVEN tasks satisfy quotas and idempotence; hashes emitted.
 
 now here are the things u must take care of:
 1. now thr is nothing called underspecificy in dev. instead  we shud be ovespecific. but anything that u r specifying must be STRICTLY grounded in our anchor docs we created.

@@ -31,7 +31,7 @@ def transport_types(
     free_tuple: Tuple[str, Tuple[Any, ...]],
     X_test_shape: Tuple[int, int],
     X_test: Optional[np.ndarray] = None,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     Build T_test per the proven FREE terminal (types-only), then disjointify.
 
@@ -42,7 +42,8 @@ def transport_types(
         X_test: Test input (needed for SBS-* selection only)
 
     Returns:
-        T_test: Test output type mosaic (np.ndarray[int]), shape determined by FREE map
+        T_test_disjoint: Test output type mosaic after disjointify (np.ndarray[int])
+        parent_of: Dict[int, int] mapping new type id S' -> parent Y0 type id S
     """
     kind, params = free_tuple
 
@@ -68,9 +69,13 @@ def transport_types(
 
     # Disjointify if terminal involves replication
     if _needs_disjointify(kind):
-        T_test = disjointify(T_test)
+        T_test_disjoint, parent_of = disjointify(T_test)
+    else:
+        # Identity doesn't replicate - use identity parent mapping
+        T_test_disjoint = T_test
+        parent_of = {int(tid): int(tid) for tid in np.unique(T_test)}
 
-    return T_test
+    return T_test_disjoint, parent_of
 
 
 def _needs_disjointify(kind: str) -> bool:
@@ -189,7 +194,7 @@ def _transport_sbs(
     return T_test
 
 
-def disjointify(T: np.ndarray) -> np.ndarray:
+def disjointify(T: np.ndarray) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     Disjointify: 4-connected component labeling per original type ID.
 
@@ -197,25 +202,27 @@ def disjointify(T: np.ndarray) -> np.ndarray:
     separate components to prevent fills from bleeding across block boundaries.
 
     Args:
-        T: Type mosaic with replicated blocks
+        T: Type mosaic with replicated blocks (pre-disjoint)
 
     Returns:
         T_disjoint: Type mosaic with 4-connected components labeled uniquely
+        parent_of: Dict mapping new type id S' -> parent (pre-disjoint) type id S
     """
     T = np.asarray(T, dtype=np.int32)
     h, w = T.shape
 
-    # Find unique type IDs
-    unique_types = np.unique(T)
+    # Find unique type IDs in ascending order (for determinism)
+    unique_types = sorted(np.unique(T).tolist())
 
-    # Build new type mosaic with disjoint labels
+    # Build new type mosaic with disjoint labels and parent mapping
     T_disjoint = np.zeros_like(T)
+    parent_of = {}
     next_global_id = 0
 
-    # Process each original type ID
-    for type_id in unique_types:
+    # Process each original type ID in ascending order
+    for parent_type_id in unique_types:
         # Isolate this type
-        mask = (T == type_id).astype(np.uint8)
+        mask = (T == parent_type_id).astype(np.uint8)
 
         # 4-connected component labeling
         labels = skimage_label(mask, connectivity=1)
@@ -228,9 +235,10 @@ def disjointify(T: np.ndarray) -> np.ndarray:
         for comp_id in component_ids:
             comp_mask = (labels == comp_id)
             T_disjoint[comp_mask] = next_global_id
+            parent_of[next_global_id] = int(parent_type_id)
             next_global_id += 1
 
-    return T_disjoint
+    return T_disjoint, parent_of
 
 
 def verify_blocks_match(
