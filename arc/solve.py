@@ -1,5 +1,5 @@
 """
-Harness + Receipts Runner (WO-2, WO-3A, WO-3B, WO-3C, WO-3D, WO-4, WO-5)
+Harness + Receipts Runner (WO-2, WO-3A, WO-3B, WO-3C, WO-3D, WO-4, WO-5, WO-6)
 
 Deterministic corpus runner that loads ARC JSON and emits receipts.
 
@@ -11,6 +11,7 @@ Modes:
   - free-sbs-param-receipts: SBS-Param verifier on types (WO-3D)
   - free-intersect-pick: FREE intersection and pick with frozen order (WO-4)
   - transport-receipts: Transport types + disjointify (WO-5)
+  - quotas-receipts: Quotas K (Paid) + Y₀ Selection (WO-6)
 
 CLI:
   python -m arc.solve --mode pi-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
@@ -20,6 +21,7 @@ CLI:
   python -m arc.solve --mode free-sbs-param-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
   python -m arc.solve --mode free-intersect-pick --challenges path/to/tasks.json --out outputs/receipts.jsonl
   python -m arc.solve --mode transport-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
+  python -m arc.solve --mode quotas-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
 """
 
 import argparse
@@ -46,6 +48,7 @@ from arc.free_prove import (
 from arc.transport import (
     transport_types, disjointify, verify_blocks_match
 )
+from arc.quotas import generate_quotas_receipt
 
 
 def load_tasks_from_json(path: Path) -> Dict[str, Dict[str, Any]]:
@@ -740,6 +743,66 @@ def run_transport_receipts(
     )
 
 
+def run_quotas_receipts(
+    tasks: Dict[str, Dict[str, Any]],
+    out_path: Path,
+) -> None:
+    """
+    Run WO-6 quotas receipts mode.
+
+    For each task:
+      - Select Y₀ using palette matching policy
+      - Compute Π(Y₀)
+      - Compute per-type color quotas K
+      - Verify conservation law
+      - Emit one JSONL line per task
+
+    Args:
+        tasks: Dict mapping task_id -> task data
+        out_path: Output path for receipts JSONL file
+    """
+    receipts: List[Dict[str, Any]] = []
+
+    # Counters for summary
+    total_tasks = len(tasks)
+    palette_match_count = 0
+    fallback_count = 0
+    all_sum_checks_passed = 0
+
+    for task_id, task_data in tasks.items():
+        # Generate receipt
+        receipt = generate_quotas_receipt(task_data, task_id)
+
+        # Track statistics
+        y0_reason = receipt["quotas"]["y0_reason"]
+        if y0_reason == "palette_match":
+            palette_match_count += 1
+        elif y0_reason == "fallback_first":
+            fallback_count += 1
+
+        # Check if all sum_checks passed
+        sum_checks = receipt["quotas"]["sum_checks"]
+        all_valid = all(check["pass"] for check in sum_checks.values())
+        if all_valid:
+            all_sum_checks_passed += 1
+
+        receipts.append(receipt)
+
+    # Write receipts
+    write_jsonl(out_path, receipts)
+
+    # Print summary
+    logging.info("=" * 60)
+    logging.info("WO-6 Quotas Receipts Summary")
+    logging.info("=" * 60)
+    logging.info(f"Total tasks processed: {total_tasks}")
+    logging.info(f"Palette match Y₀ selection: {palette_match_count}")
+    logging.info(f"Fallback Y₀ selection: {fallback_count}")
+    logging.info(f"All sum_checks passed: {all_sum_checks_passed}/{total_tasks}")
+    logging.info(f"Receipts written to: {out_path}")
+    logging.info("=" * 60)
+
+
 def _reconstruct_sbs_templates(
     kind: str,
     X0: np.ndarray,
@@ -835,8 +898,8 @@ def main() -> None:
         "--mode",
         type=str,
         required=True,
-        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts", "free-sbs-param-receipts", "free-intersect-pick", "transport-receipts"],
-        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), free-sbs-y-receipts (WO-3C), free-sbs-param-receipts (WO-3D), free-intersect-pick (WO-4), or transport-receipts (WO-5)",
+        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts", "free-sbs-param-receipts", "free-intersect-pick", "transport-receipts", "quotas-receipts"],
+        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), free-sbs-y-receipts (WO-3C), free-sbs-param-receipts (WO-3D), free-intersect-pick (WO-4), transport-receipts (WO-5), or quotas-receipts (WO-6)",
     )
 
     parser.add_argument(
@@ -902,6 +965,11 @@ def main() -> None:
         )
     elif args.mode == "transport-receipts":
         run_transport_receipts(
+            tasks=tasks,
+            out_path=args.out,
+        )
+    elif args.mode == "quotas-receipts":
+        run_quotas_receipts(
             tasks=tasks,
             out_path=args.out,
         )
