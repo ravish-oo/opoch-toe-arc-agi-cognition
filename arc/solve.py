@@ -9,7 +9,6 @@ Modes:
   - free-tile-receipts: Types-periodic tile verifier (WO-3B)
   - free-sbs-y-receipts: SBS-Y verifier on types (WO-3C)
   - free-sbs-param-receipts: SBS-Param verifier on types (WO-3D)
-  - free-stripe-receipts: Stripe/band map verifiers on types (WO-3H)
   - free-intersect-pick: FREE intersection and pick with frozen order (WO-4)
   - transport-receipts: Transport types + disjointify (WO-5)
   - quotas-receipts: Quotas K (Paid) + Y₀ Selection (WO-6)
@@ -46,7 +45,6 @@ from arc.free_sbs import (
     verify_SBS_Y, get_sbs_y_detailed_checks,
     verify_SBS_param, get_sbs_param_detailed_checks
 )
-from arc.free_stripe import verify_stripe_maps, generate_stripe_receipt
 from arc.free_prove import (
     prove_free, compute_chosen_sha256
 )
@@ -486,69 +484,6 @@ def run_free_sbs_param_receipts(
     )
 
 
-def run_free_stripe_receipts(
-    tasks: Dict[str, Dict[str, Any]],
-    out_path: Path,
-) -> None:
-    """
-    Run WO-3H Stripe/Band Map verifier mode.
-
-    For each task:
-      - Process each training pair (X->Y)
-      - Compute T_X = Π(X) and T_Y = Π(Y) type mosaics
-      - Verify stripe/band map candidates on types (row/col projections)
-      - Write one record per pair
-
-    Args:
-        tasks: Dict mapping task_id -> task data
-        out_path: Output path for receipts JSONL file
-    """
-    receipts: List[Dict[str, Any]] = []
-
-    # Counters for summary
-    total_tasks = len(tasks)
-    total_pairs = 0
-    stripe_match_count = 0
-
-    for task_id, task_data in tasks.items():
-        train_pairs = task_data.get("train", [])
-
-        # Process each training pair
-        for pair_index, pair in enumerate(train_pairs):
-            X = np.array(pair["input"], dtype=np.int32)
-            Y = np.array(pair["output"], dtype=np.int32)
-
-            # Compute type mosaics
-            T_X, _ = types_from_output(X)
-            T_Y, _ = types_from_output(Y)
-
-            # Verify stripe/band maps on types
-            candidates = verify_stripe_maps(T_X, T_Y)
-
-            # Generate detailed receipt for this pair
-            pair_receipt = generate_stripe_receipt(
-                task_id=task_id,
-                pair_index=pair_index,
-                T_X=T_X,
-                T_Y=T_Y,
-                candidates=candidates
-            )
-
-            if candidates:
-                stripe_match_count += 1
-
-            receipts.append(pair_receipt)
-            total_pairs += 1
-
-    # Write all receipts to JSONL
-    write_jsonl(out_path, receipts)
-
-    # Log summary
-    logging.info(
-        f"Processed tasks={total_tasks}, pairs={total_pairs}, stripe_matches={stripe_match_count}"
-    )
-
-
 def run_free_intersect_pick(
     tasks: Dict[str, Dict[str, Any]],
     out_path: Path,
@@ -558,7 +493,7 @@ def run_free_intersect_pick(
 
     For each task:
       - Run all WO-3 verifiers on each training pair
-      - Collect per-pair candidates (WO-3A: simple, WO-3H: stripe, WO-3B: tile, WO-3C: SBS-Y, WO-3D: SBS-param)
+      - Collect per-pair candidates (WO-3A: simple, WO-3B: tile, WO-3C: SBS-Y, WO-3D: SBS-param)
       - Call prove_free to intersect and pick
       - Write one task-level record
 
@@ -581,7 +516,6 @@ def run_free_intersect_pick(
         per_pair_tile = []
         per_pair_sbs_y = []
         per_pair_sbs_p = []
-        per_pair_stripe = []
 
         for pair_index, pair in enumerate(train_pairs):
             X = np.array(pair["input"], dtype=np.int32)
@@ -591,13 +525,8 @@ def run_free_intersect_pick(
             simple_cands = verify_simple_free(X, Y)
             per_pair_simple.append(simple_cands)
 
-            # WO-3H: Stripe/band map verifiers (rank 2)
-            T_X, _ = types_from_output(X)
-            T_Y, _ = types_from_output(Y)
-            stripe_cands = verify_stripe_maps(T_X, T_Y)
-            per_pair_stripe.append(stripe_cands)
-
             # WO-3B: Tile on types
+            T_Y, _ = types_from_output(Y)
             tile_cand = verify_tile_types(X, Y, T_Y)
             per_pair_tile.append(tile_cand)
 
@@ -615,8 +544,7 @@ def run_free_intersect_pick(
             per_pair_simple,
             per_pair_tile,
             per_pair_sbs_y,
-            per_pair_sbs_p,
-            per_pair_stripe
+            per_pair_sbs_p
         )
 
         # Build per-pair receipt structure
@@ -625,7 +553,6 @@ def run_free_intersect_pick(
             # Collect all candidates for this pair
             pair_candidates = []
             pair_candidates.extend(per_pair_simple[pair_index])
-            pair_candidates.extend(per_pair_stripe[pair_index])
             if per_pair_tile[pair_index] is not None:
                 pair_candidates.append(per_pair_tile[pair_index])
             if per_pair_sbs_y[pair_index] is not None:
@@ -1183,7 +1110,7 @@ def _reconstruct_sbs_templates(
 def _collect_per_pair_candidates(task: Dict[str, Any]) -> Tuple:
     """Helper to collect per-pair candidates for prove_free (reuses WO-3 logic)."""
     train_pairs = task.get("train", [])
-    per_pair_simple, per_pair_tile, per_pair_sbs_y, per_pair_sbs_p, per_pair_stripe = [], [], [], [], []
+    per_pair_simple, per_pair_tile, per_pair_sbs_y, per_pair_sbs_p = [], [], [], []
 
     for pair in train_pairs:
         X = np.array(pair["input"], dtype=np.int32)
@@ -1193,13 +1120,8 @@ def _collect_per_pair_candidates(task: Dict[str, Any]) -> Tuple:
         simple_cands = verify_simple_free(X, Y)
         per_pair_simple.append(simple_cands)
 
-        # WO-3H: Stripe/band map verifiers (rank 2)
-        T_X, _ = types_from_output(X)
-        T_Y, _ = types_from_output(Y)
-        stripe_cands = verify_stripe_maps(T_X, T_Y)
-        per_pair_stripe.append(stripe_cands)
-
         # WO-3B: Tile on types
+        T_Y, _ = types_from_output(Y)
         tile_cand = verify_tile_types(X, Y, T_Y)
         per_pair_tile.append(tile_cand)
 
@@ -1211,7 +1133,7 @@ def _collect_per_pair_candidates(task: Dict[str, Any]) -> Tuple:
         sbs_p_cand = verify_SBS_param(X, Y)
         per_pair_sbs_p.append(sbs_p_cand)
 
-    return per_pair_simple, per_pair_tile, per_pair_sbs_y, per_pair_sbs_p, per_pair_stripe
+    return per_pair_simple, per_pair_tile, per_pair_sbs_y, per_pair_sbs_p
 
 
 def run_v0(tasks: Dict[str, Dict[str, Any]], pred_path: Path, receipts_path: Path,
@@ -1363,7 +1285,7 @@ def run_v0(tasks: Dict[str, Dict[str, Any]], pred_path: Path, receipts_path: Pat
         {"metric": "counts_by_status", **counts},
         {"metric": "mismatch_breakdown", **mismatch_breakdown},
         {"metric": "terminal_distribution", **terminal_counts},
-        {"metric": "frozen_order_echo", "order": ["identity", ["h-mirror-concat", "v-double", "h-concat-dup", "v-concat-dup"], "band_map", "tile", "SBS-Y", "SBS-param"]}
+        {"metric": "frozen_order_echo", "order": ["identity", ["h-mirror-concat", "v-double", "h-concat-dup", "v-concat-dup"], "tile", "SBS-Y", "SBS-param"]}
     ]
     write_jsonl(report_path, report)
 
@@ -1398,8 +1320,8 @@ def main() -> None:
         "--mode",
         type=str,
         required=True,
-        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts", "free-sbs-param-receipts", "free-stripe-receipts", "free-intersect-pick", "transport-receipts", "quotas-receipts", "fill-receipts", "v0", "audit"],
-        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), free-sbs-y-receipts (WO-3C), free-sbs-param-receipts (WO-3D), free-stripe-receipts (WO-3H), free-intersect-pick (WO-4), transport-receipts (WO-5), quotas-receipts (WO-6), fill-receipts (WO-7), v0 (WO-8 end-to-end), or audit (WO-8 receipt lookup)",
+        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts", "free-sbs-param-receipts", "free-intersect-pick", "transport-receipts", "quotas-receipts", "fill-receipts", "v0", "audit"],
+        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), free-sbs-y-receipts (WO-3C), free-sbs-param-receipts (WO-3D), free-intersect-pick (WO-4), transport-receipts (WO-5), quotas-receipts (WO-6), fill-receipts (WO-7), v0 (WO-8 end-to-end), or audit (WO-8 receipt lookup)",
     )
 
     parser.add_argument(
@@ -1504,11 +1426,6 @@ def main() -> None:
         )
     elif args.mode == "free-sbs-param-receipts":
         run_free_sbs_param_receipts(
-            tasks=tasks,
-            out_path=args.out,
-        )
-    elif args.mode == "free-stripe-receipts":
-        run_free_stripe_receipts(
             tasks=tasks,
             out_path=args.out,
         )
