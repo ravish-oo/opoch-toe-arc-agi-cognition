@@ -48,28 +48,31 @@ def transport_types(
     kind, params = free_tuple
 
     # Apply FREE morphism (types only, no colors)
+    # Replicating transports return (T_test, copy_mask), identity returns T_test
     if kind == "identity":
         T_test = _transport_identity(T_train)
+        copy_mask = None
     elif kind == "h-mirror-concat":
-        T_test = _transport_h_mirror_concat(T_train, params)
+        T_test, copy_mask = _transport_h_mirror_concat(T_train, params)
     elif kind == "v-double":
-        T_test = _transport_v_double(T_train)
+        T_test, copy_mask = _transport_v_double(T_train)
     elif kind == "h-concat-dup":
-        T_test = _transport_h_concat_dup(T_train)
+        T_test, copy_mask = _transport_h_concat_dup(T_train)
     elif kind == "v-concat-dup":
-        T_test = _transport_v_concat_dup(T_train)
+        T_test, copy_mask = _transport_v_concat_dup(T_train)
     elif kind == "tile":
-        T_test = _transport_tile(T_train, params)
+        T_test, copy_mask = _transport_tile(T_train, params)
     elif kind == "SBS-Y":
-        T_test = _transport_sbs(T_train, params, X_test, kind="SBS-Y")
+        T_test, copy_mask = _transport_sbs(T_train, params, X_test, kind="SBS-Y")
     elif kind == "SBS-param":
-        T_test = _transport_sbs(T_train, params, X_test, kind="SBS-param")
+        T_test, copy_mask = _transport_sbs(T_train, params, X_test, kind="SBS-param")
     else:
         raise ValueError(f"Unknown FREE kind: {kind}")
 
     # Disjointify if terminal involves replication
     if _needs_disjointify(kind):
-        T_test_disjoint, parent_of = disjointify(T_test)
+        # Pass copy_mask to prevent cross-copy merging
+        T_test_disjoint, parent_of = disjointify(T_test, copy_mask)
     else:
         # Identity doesn't replicate - use identity parent mapping
         T_test_disjoint = T_test
@@ -89,39 +92,89 @@ def _transport_identity(T_train: np.ndarray) -> np.ndarray:
     return T_train.copy()
 
 
-def _transport_h_mirror_concat(T_train: np.ndarray, params: Tuple[Any, ...]) -> np.ndarray:
+def _transport_h_mirror_concat(T_train: np.ndarray, params: Tuple[Any, ...]) -> Tuple[np.ndarray, np.ndarray]:
     """
     Horizontal mirror concatenation.
 
     Two variants:
       - "rev|id": [fliplr(T_train) | T_train]
       - "id|rev": [T_train | fliplr(T_train)]
+
+    Returns:
+        T_test: Concatenated type mosaic
+        copy_mask: Grid marking left half as copy 0, right half as copy 1
     """
     variant = params[0] if params else "id|rev"
     T_flip = np.fliplr(T_train)
+    h, w = T_train.shape
 
     if variant == "rev|id":
-        return np.concatenate([T_flip, T_train], axis=1)
+        T_test = np.concatenate([T_flip, T_train], axis=1)
     else:  # "id|rev"
-        return np.concatenate([T_train, T_flip], axis=1)
+        T_test = np.concatenate([T_train, T_flip], axis=1)
+
+    # Create copy mask: left half = 0, right half = 1
+    copy_mask = np.zeros((h, 2 * w), dtype=np.int32)
+    copy_mask[:, w:] = 1
+
+    return T_test, copy_mask
 
 
-def _transport_v_double(T_train: np.ndarray) -> np.ndarray:
-    """Vertical double: [T_train; T_train]."""
-    return np.concatenate([T_train, T_train], axis=0)
+def _transport_v_double(T_train: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Vertical double: [T_train; T_train].
+
+    Returns:
+        T_test: Vertically duplicated type mosaic
+        copy_mask: Grid marking top half as copy 0, bottom half as copy 1
+    """
+    T_test = np.concatenate([T_train, T_train], axis=0)
+    h, w = T_train.shape
+
+    # Create copy mask: top half = 0, bottom half = 1
+    copy_mask = np.zeros((2 * h, w), dtype=np.int32)
+    copy_mask[h:, :] = 1
+
+    return T_test, copy_mask
 
 
-def _transport_h_concat_dup(T_train: np.ndarray) -> np.ndarray:
-    """Horizontal concatenation duplicate: [T_train | T_train]."""
-    return np.concatenate([T_train, T_train], axis=1)
+def _transport_h_concat_dup(T_train: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Horizontal concatenation duplicate: [T_train | T_train].
+
+    Returns:
+        T_test: Horizontally duplicated type mosaic
+        copy_mask: Grid marking left half as copy 0, right half as copy 1
+    """
+    T_test = np.concatenate([T_train, T_train], axis=1)
+    h, w = T_train.shape
+
+    # Create copy mask: left half = 0, right half = 1
+    copy_mask = np.zeros((h, 2 * w), dtype=np.int32)
+    copy_mask[:, w:] = 1
+
+    return T_test, copy_mask
 
 
-def _transport_v_concat_dup(T_train: np.ndarray) -> np.ndarray:
-    """Vertical concatenation duplicate: [T_train; T_train]."""
-    return np.concatenate([T_train, T_train], axis=0)
+def _transport_v_concat_dup(T_train: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Vertical concatenation duplicate: [T_train; T_train].
+
+    Returns:
+        T_test: Vertically duplicated type mosaic
+        copy_mask: Grid marking top half as copy 0, bottom half as copy 1
+    """
+    T_test = np.concatenate([T_train, T_train], axis=0)
+    h, w = T_train.shape
+
+    # Create copy mask: top half = 0, bottom half = 1
+    copy_mask = np.zeros((2 * h, w), dtype=np.int32)
+    copy_mask[h:, :] = 1
+
+    return T_test, copy_mask
 
 
-def _transport_tile(T_train: np.ndarray, params: Tuple[int, int]) -> np.ndarray:
+def _transport_tile(T_train: np.ndarray, params: Tuple[int, int]) -> Tuple[np.ndarray, np.ndarray]:
     """
     Tile (integer blow-up): repeat T_train by (sh, sw).
 
@@ -130,10 +183,25 @@ def _transport_tile(T_train: np.ndarray, params: Tuple[int, int]) -> np.ndarray:
         params: (sh, sw) - repetition factors
 
     Returns:
-        Tiled type mosaic of shape (sh*h, sw*w)
+        T_test: Tiled type mosaic of shape (sh*h, sw*w)
+        copy_mask: Grid where each tile block has a unique copy_id
     """
     sh, sw = params
-    return np.tile(T_train, (sh, sw))
+    h, w = T_train.shape
+
+    T_test = np.tile(T_train, (sh, sw))
+
+    # Create copy mask: each tile block (i,j) gets unique copy_id
+    copy_mask = np.zeros((sh * h, sw * w), dtype=np.int32)
+    copy_id = 0
+    for i in range(sh):
+        for j in range(sw):
+            r0, r1 = i * h, (i + 1) * h
+            c0, c1 = j * w, (j + 1) * w
+            copy_mask[r0:r1, c0:c1] = copy_id
+            copy_id += 1
+
+    return T_test, copy_mask
 
 
 def _transport_sbs(
@@ -141,7 +209,7 @@ def _transport_sbs(
     params: Tuple[Any, ...],
     X_test: np.ndarray,
     kind: str
-) -> np.ndarray:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     SBS (Selector-driven Block Substitution).
 
@@ -155,7 +223,8 @@ def _transport_sbs(
         kind: "SBS-Y" or "SBS-param"
 
     Returns:
-        T_test with templates placed according to X_test selector
+        T_test: Type mosaic with templates placed according to X_test selector
+        copy_mask: Grid where each block (i,j) gets unique copy_id
     """
     if len(params) < 3:
         raise ValueError(f"SBS params must include (sh, sw, sigma_table, templates): got {params}")
@@ -167,13 +236,21 @@ def _transport_sbs(
     H, W = X_test.shape
     h, w = H * sh, W * sw
 
-    # Build empty test canvas
+    # Build empty test canvas and copy mask
     T_test = np.zeros((h, w), dtype=np.int32)
+    copy_mask = np.zeros((h, w), dtype=np.int32)
 
     # Place templates according to X_test selector
+    copy_id = 0
     for i in range(H):
         for j in range(W):
             v = int(X_test[i, j])
+
+            # Assign unique copy_id to this block
+            r0, r1 = i * sh, (i + 1) * sh
+            c0, c1 = j * sw, (j + 1) * sw
+            copy_mask[r0:r1, c0:c1] = copy_id
+            copy_id += 1
 
             # Lookup template ID from sigma
             if v not in sigma_table:
@@ -187,22 +264,25 @@ def _transport_sbs(
                 continue
 
             # Place template into block
-            r0, r1 = i * sh, (i + 1) * sh
-            c0, c1 = j * sw, (j + 1) * sw
             T_test[r0:r1, c0:c1] = templates[tid]
 
-    return T_test
+    return T_test, copy_mask
 
 
-def disjointify(T: np.ndarray) -> Tuple[np.ndarray, Dict[int, int]]:
+def disjointify(T: np.ndarray, copy_mask: np.ndarray = None) -> Tuple[np.ndarray, Dict[int, int]]:
     """
-    Disjointify: 4-connected component labeling per original type ID.
+    Disjointify: 4-connected component labeling per (type ID, copy ID) pair.
 
     After replication (tile, dup, mirror, SBS), split each type ID into
     separate components to prevent fills from bleeding across block boundaries.
 
+    CRITICAL: When copy_mask is provided, never merge components across different
+    copy_ids - this enforces the conservation law (|S'| = sum K[parent]).
+
     Args:
         T: Type mosaic with replicated blocks (pre-disjoint)
+        copy_mask: Optional grid same shape as T, where copy_mask[r,c] = copy_id.
+                   Components will never merge across different copy_ids.
 
     Returns:
         T_disjoint: Type mosaic with 4-connected components labeled uniquely
@@ -211,20 +291,32 @@ def disjointify(T: np.ndarray) -> Tuple[np.ndarray, Dict[int, int]]:
     T = np.asarray(T, dtype=np.int32)
     h, w = T.shape
 
-    # Find unique type IDs in ascending order (for determinism)
-    unique_types = sorted(np.unique(T).tolist())
+    if copy_mask is None:
+        # No copy boundaries - original behavior
+        copy_mask = np.zeros_like(T)
+
+    copy_mask = np.asarray(copy_mask, dtype=np.int32)
+
+    # Find unique (type_id, copy_id) pairs in sorted order (for determinism)
+    unique_pairs = []
+    for r in range(h):
+        for c in range(w):
+            pair = (int(T[r, c]), int(copy_mask[r, c]))
+            if pair not in unique_pairs:
+                unique_pairs.append(pair)
+    unique_pairs.sort()
 
     # Build new type mosaic with disjoint labels and parent mapping
     T_disjoint = np.zeros_like(T)
     parent_of = {}
     next_global_id = 0
 
-    # Process each original type ID in ascending order
-    for parent_type_id in unique_types:
-        # Isolate this type
-        mask = (T == parent_type_id).astype(np.uint8)
+    # Process each (parent_type_id, copy_id) pair in sorted order
+    for parent_type_id, copy_id in unique_pairs:
+        # Isolate this (type, copy) combination
+        mask = ((T == parent_type_id) & (copy_mask == copy_id)).astype(np.uint8)
 
-        # 4-connected component labeling
+        # 4-connected component labeling within this copy
         labels = skimage_label(mask, connectivity=1)
 
         # Get unique component labels (exclude 0 = background)

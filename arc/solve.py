@@ -1,5 +1,5 @@
 """
-Harness + Receipts Runner (WO-2, WO-3A, WO-3B, WO-3C, WO-3D, WO-4, WO-5, WO-6)
+Harness + Receipts Runner (WO-2, WO-3A, WO-3B, WO-3C, WO-3D, WO-4, WO-5, WO-6, WO-7)
 
 Deterministic corpus runner that loads ARC JSON and emits receipts.
 
@@ -12,6 +12,7 @@ Modes:
   - free-intersect-pick: FREE intersection and pick with frozen order (WO-4)
   - transport-receipts: Transport types + disjointify (WO-5)
   - quotas-receipts: Quotas K (Paid) + Y₀ Selection (WO-6)
+  - fill-receipts: Fill by Rank + Idempotence (WO-7)
 
 CLI:
   python -m arc.solve --mode pi-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
@@ -22,6 +23,7 @@ CLI:
   python -m arc.solve --mode free-intersect-pick --challenges path/to/tasks.json --out outputs/receipts.jsonl
   python -m arc.solve --mode transport-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
   python -m arc.solve --mode quotas-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
+  python -m arc.solve --mode fill-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
 """
 
 import argparse
@@ -49,6 +51,7 @@ from arc.transport import (
     transport_types, disjointify, verify_blocks_match
 )
 from arc.quotas import generate_quotas_receipt
+from arc.fill import fill_by_rank, generate_fill_receipt
 
 
 def load_tasks_from_json(path: Path) -> Dict[str, Dict[str, Any]]:
@@ -675,17 +678,17 @@ def run_transport_receipts(
         if kind == "identity":
             T_test_before = _transport_identity(T_Y0)
         elif kind == "h-mirror-concat":
-            T_test_before = _transport_h_mirror_concat(T_Y0, params)
+            T_test_before, _ = _transport_h_mirror_concat(T_Y0, params)
         elif kind == "v-double":
-            T_test_before = _transport_v_double(T_Y0)
+            T_test_before, _ = _transport_v_double(T_Y0)
         elif kind == "h-concat-dup":
-            T_test_before = _transport_h_concat_dup(T_Y0)
+            T_test_before, _ = _transport_h_concat_dup(T_Y0)
         elif kind == "v-concat-dup":
-            T_test_before = _transport_v_concat_dup(T_Y0)
+            T_test_before, _ = _transport_v_concat_dup(T_Y0)
         elif kind == "tile":
-            T_test_before = _transport_tile(T_Y0, params)
+            T_test_before, _ = _transport_tile(T_Y0, params)
         elif kind in ["SBS-Y", "SBS-param"]:
-            T_test_before = _transport_sbs(T_Y0, free_tuple[1], X_test, kind)
+            T_test_before, _ = _transport_sbs(T_Y0, free_tuple[1], X_test, kind)
         else:
             T_test_before = T_Y0.copy()
 
@@ -855,6 +858,170 @@ def run_quotas_receipts(
     logging.info("=" * 60)
 
 
+def run_fill_receipts(
+    tasks: Dict[str, Dict[str, Any]],
+    out_path: Path,
+) -> None:
+    """
+    Run WO-7 fill-receipts mode.
+
+    For each FREE_PROVEN task:
+      - Load T_test and parent_of from WO-5 (re-compute transport)
+      - Load K from WO-6 receipts
+      - Call fill_by_rank to get Y*
+      - Generate receipt with block verification and idempotence check
+      - Emit one JSONL line per task
+
+    Args:
+        tasks: Dict mapping task_id -> task data
+        out_path: Output path for receipts JSONL file
+    """
+    receipts: List[Dict[str, Any]] = []
+
+    # Load WO-4 receipts to get proven terminals
+    wo4_path = Path("outputs/receipts_wo4.jsonl")
+    if not wo4_path.exists():
+        logging.error(f"WO-4 receipts not found: {wo4_path}")
+        raise SystemExit(1)
+
+    wo4_receipts = {}
+    with open(wo4_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            rec = json.loads(line)
+            wo4_receipts[rec["task_id"]] = rec
+
+    # Load WO-6 receipts to get quotas
+    wo6_path = Path("outputs/receipts_wo6_train.jsonl")
+    if not wo6_path.exists():
+        logging.error(f"WO-6 receipts not found: {wo6_path}")
+        raise SystemExit(1)
+
+    wo6_receipts = {}
+    with open(wo6_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            rec = json.loads(line)
+            wo6_receipts[rec["task_id"]] = rec
+
+    # Counters for summary
+    total_tasks = len(tasks)
+    processed_count = 0
+    skipped_unproven = 0
+    all_blocks_satisfied = 0
+    all_idempotent = 0
+    all_blocks_size_match = 0
+    all_no_oob = 0
+
+    for task_id, task_data in tasks.items():
+        # Get WO-4 result
+        if task_id not in wo4_receipts:
+            continue
+
+        wo4_rec = wo4_receipts[task_id]
+        free_inter = wo4_rec["free_intersection"]
+
+        # Skip unproven tasks
+        if "chosen" not in free_inter:
+            skipped_unproven += 1
+            continue
+
+        # Get WO-6 quotas
+        if task_id not in wo6_receipts:
+            skipped_unproven += 1
+            continue
+
+        wo6_rec = wo6_receipts[task_id]
+        K_serialized = wo6_rec["quotas"]["K"]
+        C = wo6_rec["quotas"]["C"]
+        y0_index = wo6_rec["quotas"]["y0_index"]
+
+        # Convert K from serialized format
+        K = {int(type_id): np.array(counts, dtype=np.int64)
+             for type_id, counts in K_serialized.items()}
+
+        # Get chosen terminal
+        chosen = free_inter["chosen"]
+        kind, params = chosen[0], chosen[1]
+
+        # Get training pairs
+        train_pairs = task_data.get("train", [])
+        if len(train_pairs) == 0:
+            continue
+
+        # Use Y₀ selected by WO-6 (not hardcoded [0]!)
+        if y0_index >= len(train_pairs):
+            continue
+
+        X0 = np.array(train_pairs[y0_index]["input"], dtype=np.int32)
+        Y0 = np.array(train_pairs[y0_index]["output"], dtype=np.int32)
+        T_Y0, _ = types_from_output(Y0)
+
+        # Get test input
+        test_cases = task_data.get("test", [])
+        if len(test_cases) == 0:
+            continue
+
+        X_test = np.array(test_cases[0]["input"], dtype=np.int32)
+
+        # Reconstruct SBS templates if needed
+        templates = None
+        if kind in ["SBS-Y", "SBS-param"]:
+            templates = _reconstruct_sbs_templates(kind, X0, Y0, T_Y0, params)
+
+        # Build free_tuple for transport
+        if templates is not None:
+            sh, sw = params[0], params[1]
+            sigma_table = params[2] if len(params) > 2 else {}
+            free_tuple = (kind, (sh, sw, sigma_table, templates))
+        else:
+            free_tuple = (kind, params)
+
+        # Transport types to get T_test and parent_of
+        T_test, parent_of = transport_types(T_Y0, free_tuple, X_test.shape, X_test)
+
+        # Fill by rank
+        Y_star = fill_by_rank(T_test, parent_of, K, C)
+
+        # Generate receipt
+        receipt = generate_fill_receipt(task_id, T_test, parent_of, K, Y_star, C)
+
+        # Track statistics
+        blocks_data = receipt["fill"]["blocks"]
+        all_satisfied = all(b["quota_satisfied"] for b in blocks_data)
+        if all_satisfied:
+            all_blocks_satisfied += 1
+
+        if receipt["fill"]["idempotent"]:
+            all_idempotent += 1
+
+        # Track conservation law violations
+        all_size_match = all(b.get("size_match", True) for b in blocks_data)
+        no_oob_colors = all(not b.get("oob_color", False) for b in blocks_data)
+        if all_size_match:
+            all_blocks_size_match += 1
+        if no_oob_colors:
+            all_no_oob += 1
+
+        receipts.append(receipt)
+        processed_count += 1
+
+    # Write receipts
+    write_jsonl(out_path, receipts)
+
+    # Print summary
+    logging.info("=" * 60)
+    logging.info("WO-7 Fill Receipts Summary")
+    logging.info("=" * 60)
+    logging.info(f"Total tasks: {total_tasks}")
+    logging.info(f"Processed (FREE_PROVEN): {processed_count}")
+    logging.info(f"Skipped (unproven): {skipped_unproven}")
+    logging.info(f"All blocks quota_satisfied: {all_blocks_satisfied}/{processed_count}")
+    logging.info(f"All blocks size_match (conservation law): {all_blocks_size_match}/{processed_count}")
+    logging.info(f"All no OOB colors: {all_no_oob}/{processed_count}")
+    logging.info(f"All idempotent: {all_idempotent}/{processed_count}")
+    logging.info(f"Receipts written to: {out_path}")
+    logging.info("=" * 60)
+
+
 def _reconstruct_sbs_templates(
     kind: str,
     X0: np.ndarray,
@@ -950,8 +1117,8 @@ def main() -> None:
         "--mode",
         type=str,
         required=True,
-        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts", "free-sbs-param-receipts", "free-intersect-pick", "transport-receipts", "quotas-receipts"],
-        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), free-sbs-y-receipts (WO-3C), free-sbs-param-receipts (WO-3D), free-intersect-pick (WO-4), transport-receipts (WO-5), or quotas-receipts (WO-6)",
+        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts", "free-sbs-param-receipts", "free-intersect-pick", "transport-receipts", "quotas-receipts", "fill-receipts"],
+        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), free-sbs-y-receipts (WO-3C), free-sbs-param-receipts (WO-3D), free-intersect-pick (WO-4), transport-receipts (WO-5), quotas-receipts (WO-6), or fill-receipts (WO-7)",
     )
 
     parser.add_argument(
@@ -1022,6 +1189,11 @@ def main() -> None:
         )
     elif args.mode == "quotas-receipts":
         run_quotas_receipts(
+            tasks=tasks,
+            out_path=args.out,
+        )
+    elif args.mode == "fill-receipts":
+        run_fill_receipts(
             tasks=tasks,
             out_path=args.out,
         )
