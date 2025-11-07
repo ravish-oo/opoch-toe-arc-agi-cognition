@@ -27,6 +27,7 @@ CLI:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -50,8 +51,8 @@ from arc.free_prove import (
 from arc.transport import (
     transport_types, disjointify, verify_blocks_match
 )
-from arc.quotas import generate_quotas_receipt
-from arc.fill import fill_by_rank, generate_fill_receipt
+from arc.quotas import generate_quotas_receipt, choose_Y0, quotas
+from arc.fill import fill_by_rank, generate_fill_receipt, idempotence_check
 
 
 def load_tasks_from_json(path: Path) -> Dict[str, Dict[str, Any]]:
@@ -1100,6 +1101,161 @@ def _reconstruct_sbs_templates(
     return templates
 
 
+def _collect_per_pair_candidates(task: Dict[str, Any]) -> Tuple:
+    """Helper to collect per-pair candidates for prove_free (reuses WO-3 logic)."""
+    train_pairs = task.get("train", [])
+    per_pair_simple, per_pair_tile, per_pair_sbs_y, per_pair_sbs_p = [], [], [], []
+
+    for pair in train_pairs:
+        X = np.array(pair["input"], dtype=np.int32)
+        Y = np.array(pair["output"], dtype=np.int32)
+
+        # WO-3A: Simple FREE verifiers
+        simple_cands = verify_simple_free(X, Y)
+        per_pair_simple.append(simple_cands)
+
+        # WO-3B: Tile on types
+        T_Y, _ = types_from_output(Y)
+        tile_cand = verify_tile_types(X, Y, T_Y)
+        per_pair_tile.append(tile_cand)
+
+        # WO-3C: SBS-Y on types
+        sbs_y_cand = verify_SBS_Y(X, T_Y)
+        per_pair_sbs_y.append(sbs_y_cand)
+
+        # WO-3D: SBS-Param on types
+        sbs_p_cand = verify_SBS_param(X, Y)
+        per_pair_sbs_p.append(sbs_p_cand)
+
+    return per_pair_simple, per_pair_tile, per_pair_sbs_y, per_pair_sbs_p
+
+
+def run_v0(tasks: Dict[str, Dict[str, Any]], pred_path: Path, receipts_path: Path,
+           report_path: Path, with_gt: bool = False, gt_path: Path = None) -> None:
+    """
+    WO-8: End-to-end v0 runner (thin orchestration only).
+
+    Chains WO-4 → WO-6 → WO-5 → WO-7 without re-implementing any WO logic.
+    """
+    predictions = []
+    triages = []
+    terminal_counts = {}
+
+    if with_gt and gt_path:
+        # GT solutions file is {task_id: [[grid]]} format
+        with open(gt_path, "r") as f:
+            gt_tasks = json.load(f)
+    else:
+        gt_tasks = {}
+
+    for task_id, task in tasks.items():
+        # WO-4: prove FREE (collect candidates using WO-3 verifiers)
+        candidates = _collect_per_pair_candidates(task)
+        status4, payload4 = prove_free(task, *candidates)
+        if status4 == "FREE_UNPROVEN":
+            triages.append({"task_id": task_id, "triage": {"status": "SKIPPED", "reason": "FREE_UNPROVEN"}})
+            continue
+
+        chosen = payload4["chosen"]
+        free_tuple = chosen  # Already in (kind, params) format from prove_free
+        terminal_counts[chosen[0]] = terminal_counts.get(chosen[0], 0) + 1
+
+        # WO-6: choose Y₀ and quotas
+        y0_index = choose_Y0(task)
+        Y0 = np.array(task["train"][y0_index]["output"], dtype=np.int32)
+        T_Y0, _ = types_from_output(Y0)
+        K = quotas(Y0, T_Y0, C=10)
+
+        # WO-5: transport types
+        X_test = np.array(task["test"][0]["input"], dtype=np.int32)
+        T_test, parent_of = transport_types(T_Y0, free_tuple, X_test.shape, X_test)
+
+        # WO-7: fill + idempotence
+        Y_star = fill_by_rank(T_test, parent_of, K, C=10)
+        idempotent = idempotence_check(Y_star, C=10)
+
+        # Generate WO-6 and WO-7 receipts to check for IMPLEMENTATION failures
+        quotas_receipt = generate_quotas_receipt(task, task_id)
+        fill_receipt = generate_fill_receipt(task_id, T_test, parent_of, K, Y_star, C=10)
+
+        # Check receipts for failures
+        fill_blocks = fill_receipt["fill"]["blocks"]
+        all_quota_satisfied = all(b["quota_satisfied"] for b in fill_blocks)
+        all_size_match = all(b.get("size_match", True) for b in fill_blocks)
+        no_oob_colors = all(not b.get("oob_color", False) for b in fill_blocks)
+        receipts_green = all_quota_satisfied and all_size_match and no_oob_colors and idempotent
+
+        # SHA256 of prediction
+        sha256_pred = hashlib.sha256(Y_star.astype(np.int64).tobytes()).hexdigest()
+
+        # Write prediction
+        predictions.append({"id": task_id, "output": Y_star.tolist(), "sha256": sha256_pred})
+
+        # Triage (if GT available)
+        if with_gt and task_id in gt_tasks:
+            # GT format is [[grid]] - extract grid
+            GT = np.array(gt_tasks[task_id][0], dtype=np.int32)
+            sha256_gt = hashlib.sha256(GT.astype(np.int64).tobytes()).hexdigest()
+
+            if np.array_equal(Y_star, GT):
+                triage = {"status": "MATCH", "reason": None}
+            else:
+                # Diagnose GT using prove_free (reuses WO-4 logic)
+                synth_task = {"train": [{"input": X_test.tolist(), "output": GT.tolist()}], "test": [{"input": X_test.tolist()}]}
+                gt_candidates = _collect_per_pair_candidates(synth_task)
+                gt_status, gt_payload = prove_free(synth_task, *gt_candidates)
+                gt_free = gt_payload["chosen"] if gt_status == "FREE_PROVEN" else None
+
+                if gt_free is None or gt_free != chosen:
+                    triage = {"status": "MISMATCH", "reason": "FREE_DIFFERS", "gt_free": gt_free}
+                elif not receipts_green:
+                    # IMPLEMENTATION: any receipts from WO-5/6/7 were not green
+                    triage = {"status": "MISMATCH", "reason": "IMPLEMENTATION"}
+                else:
+                    triage = {"status": "MISMATCH", "reason": "POLICY"}
+
+            triage.update({"free_chosen": chosen, "gt_free": gt_free if 'gt_free' in locals() else chosen,
+                           "sha256_prediction": sha256_pred, "sha256_gt": sha256_gt})
+            triages.append({"task_id": task_id, "triage": triage})
+
+    # Write outputs
+    with open(pred_path, "w") as f:
+        json.dump(predictions, f, indent=2)
+
+    write_jsonl(receipts_path, triages)
+
+    # Report
+    counts = {"MATCH": 0, "MISMATCH": 0, "SKIPPED": 0}
+    mismatch_breakdown = {"IMPLEMENTATION": 0, "POLICY": 0, "FREE_DIFFERS": 0}
+    for t in triages:
+        status = t["triage"]["status"]
+        counts[status] = counts.get(status, 0) + 1
+        if status == "MISMATCH":
+            reason = t["triage"].get("reason", "UNKNOWN")
+            mismatch_breakdown[reason] = mismatch_breakdown.get(reason, 0) + 1
+
+    report = [
+        {"metric": "counts_by_status", **counts},
+        {"metric": "mismatch_breakdown", **mismatch_breakdown},
+        {"metric": "terminal_distribution", **terminal_counts},
+        {"metric": "frozen_order_echo", "order": ["identity", ["h-mirror-concat", "v-double", "h-concat-dup", "v-concat-dup"], "tile", "SBS-Y", "SBS-param"]}
+    ]
+    write_jsonl(report_path, report)
+
+    logging.info(f"v0 completed: {len(predictions)} predictions, {counts['MATCH']} MATCH, {counts['MISMATCH']} MISMATCH, {counts['SKIPPED']} SKIPPED")
+
+
+def run_audit(task_id: str, receipts_path: Path) -> None:
+    """WO-8: Audit mode - print receipt for given task ID."""
+    with open(receipts_path, "r") as f:
+        for line in f:
+            receipt = json.loads(line)
+            if receipt.get("task_id") == task_id:
+                print(json.dumps(receipt, indent=2))
+                return
+    logging.error(f"Task {task_id} not found in receipts")
+
+
 def main() -> None:
     """CLI entry point with argparse."""
     # Configure logging (single INFO line per WO-2)
@@ -1117,22 +1273,22 @@ def main() -> None:
         "--mode",
         type=str,
         required=True,
-        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts", "free-sbs-param-receipts", "free-intersect-pick", "transport-receipts", "quotas-receipts", "fill-receipts"],
-        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), free-sbs-y-receipts (WO-3C), free-sbs-param-receipts (WO-3D), free-intersect-pick (WO-4), transport-receipts (WO-5), quotas-receipts (WO-6), or fill-receipts (WO-7)",
+        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts", "free-sbs-param-receipts", "free-intersect-pick", "transport-receipts", "quotas-receipts", "fill-receipts", "v0", "audit"],
+        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), free-sbs-y-receipts (WO-3C), free-sbs-param-receipts (WO-3D), free-intersect-pick (WO-4), transport-receipts (WO-5), quotas-receipts (WO-6), fill-receipts (WO-7), v0 (WO-8 end-to-end), or audit (WO-8 receipt lookup)",
     )
 
     parser.add_argument(
         "--challenges",
         type=Path,
-        required=True,
-        help="Path to ARC challenges JSON file",
+        required=False,
+        help="Path to ARC challenges JSON file (not required for audit mode)",
     )
 
     parser.add_argument(
         "--out",
         type=Path,
-        required=True,
-        help="Output path for receipts JSONL file",
+        required=False,
+        help="Output path for receipts JSONL file (for WO-2 through WO-7 modes)",
     )
 
     parser.add_argument(
@@ -1141,14 +1297,54 @@ def main() -> None:
         help="Include test input grids in Π receipts (for sanity checking)",
     )
 
+    # WO-8 v0 mode arguments
+    parser.add_argument(
+        "--pred",
+        type=Path,
+        help="Output path for predictions JSON (v0 mode)",
+    )
+
+    parser.add_argument(
+        "--receipts",
+        type=Path,
+        help="Output path for receipts JSONL (v0 mode / audit mode input)",
+    )
+
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="Output path for report JSONL (v0 mode)",
+    )
+
+    parser.add_argument(
+        "--with-gt",
+        action="store_true",
+        help="Enable ground truth triage (v0 mode)",
+    )
+
+    parser.add_argument(
+        "--gt",
+        type=Path,
+        help="Path to ground truth solutions JSON (v0 mode)",
+    )
+
+    # WO-8 audit mode arguments
+    parser.add_argument(
+        "--id",
+        type=str,
+        help="Task ID to audit (audit mode)",
+    )
+
     args = parser.parse_args()
 
-    # Load tasks
-    if not args.challenges.exists():
-        logging.error(f"Challenges file not found: {args.challenges}")
-        raise SystemExit(1)
-
-    tasks = load_tasks_from_json(args.challenges)
+    # Load tasks (not needed for audit mode)
+    if args.mode == "audit":
+        tasks = None
+    else:
+        if not args.challenges or not args.challenges.exists():
+            logging.error(f"Challenges file not found or not specified: {args.challenges}")
+            raise SystemExit(1)
+        tasks = load_tasks_from_json(args.challenges)
 
     # Run requested mode
     if args.mode == "pi-receipts":
@@ -1196,6 +1392,22 @@ def main() -> None:
         run_fill_receipts(
             tasks=tasks,
             out_path=args.out,
+        )
+
+    elif args.mode == "v0":
+        run_v0(
+            tasks=tasks,
+            pred_path=args.pred,
+            receipts_path=args.receipts,
+            report_path=args.report,
+            with_gt=args.with_gt,
+            gt_path=args.gt,
+        )
+
+    elif args.mode == "audit":
+        run_audit(
+            task_id=args.id,
+            receipts_path=args.receipts,
         )
 
 

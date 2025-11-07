@@ -1,13 +1,13 @@
 now let's expand this wo. so now tell me what kinds of "mature, well-documented Python libraries for every primitive we need" can be reused for
-## WO-7 — Fill by Rank + Idempotence
+## WO-8 — v0 Runner (Batch + Audit)
 
-**Goal:** Produce (Y^*) via the meet rule and certify fixed-point behavior.
+**Goal:** End-to-end solve on all tasks we can prove FREE for; write predictions and receipts.
 
-* **Scope:** Row-major ranks within each transported type; cumulative cuts Σ; assign smallest c with rank ≤ Σ(c); recompute Π/K on (Y^*), re-fill to confirm idempotence.
-* **Libs:** `numpy`
-* **IO:** `fill_by_rank(T_test, K, C) -> Y*`
-* **Receipts:** quota satisfaction per type (counts match K); per-rank minimality; idempotence true; SHA256(Y*).
-* **Pass criteria:** All FREE_PROVEN tasks satisfy quotas and idempotence; hashes emitted.
+* **Scope:** `solve_batch` that: Π on Y₀ → K; FREE proof → transport → fill; write outputs JSON and receipts JSONL; `audit <id>` CLI to dump receipts for one task.
+* **Libs:** `numpy`, `typer/argparse`, `hashlib`
+* **IO:** `solve(challenges.json) -> predictions.json + receipts.jsonl`
+* **Receipts:** corpus summary (counts by terminal, FREE_PROVEN vs UNPROVEN), frozen simplicity order echo.
+* **Pass criteria:** **600+ tasks** attemptable now; outputs + receipts produced deterministically; no crashes on full corpus.
 
 now here are the things u must take care of:
 1. now thr is nothing called underspecificy in dev. instead  we shud be ovespecific. but anything that u r specifying must be STRICTLY grounded in our anchor docs we created.
