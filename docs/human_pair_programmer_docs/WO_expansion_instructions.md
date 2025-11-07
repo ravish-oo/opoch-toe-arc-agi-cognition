@@ -1,15 +1,13 @@
 now let's expand this wo. so now tell me what kinds of "mature, well-documented Python libraries for every primitive we need" can be reused for
-## WO-4 — FREE Intersection + Pick (Frozen Order)
+## WO-5 — Transport Types + Disjointify
 
-**Goal:** Task-level proof: intersect per-pair candidates and select terminal per frozen order.
+**Goal:** Build the **test** type mosaic exactly as the proven FREE map dictates; keep copies disjoint.
 
-* **Scope:** Intersect candidates across all train pairs **per slot**; prefer no D4/translate (slots included but default “none” in v0); select terminal by fixed order:
-
-  1. identity, 2) {h-mirror, v-double, h/v-dup}, 3) tile, 4) SBS-Y, 5) SBS-param.
-* **Libs:** `numpy`
-* **IO:** `prove_free(task) -> ("FREE_PROVEN", tuple) | ("FREE_UNPROVEN", reason)`
-* **Receipts:** list all candidates per pair, the intersected set, and the chosen terminal with parameters.
-* **Pass criteria:** On the full corpus, produces a proven tuple for ~**600+** tasks (the “attemptable now” bucket) and marks others unproven; no ad-hoc fallbacks.
+* **Scope:** Implement transport for terminals from WO-3/4: identity, mirror-concat, v-double, concat-dup, tile, SBS-Y, SBS-param. Then disjointify (connected-component relabel) so fills don’t bleed.
+* **Libs:** `numpy`, `skimage.measure.label` (4-conn) or simple DFS
+* **IO:** `transport_types(T_train, free_tuple, X_test_shape, X*, Y0) -> T_test`
+* **Receipts:** output shape; per-block template hash match; pre/post disjoint type counts.
+* **Pass criteria:** All FREE_PROVEN tasks pass shape checks and block template matches.
 
 now here are the things u must take care of:
 1. now thr is nothing called underspecificy in dev. instead  we shud be ovespecific. but anything that u r specifying must be STRICTLY grounded in our anchor docs we created.

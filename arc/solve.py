@@ -1,5 +1,5 @@
 """
-Harness + Receipts Runner (WO-2, WO-3A, WO-3B, WO-3C, WO-3D)
+Harness + Receipts Runner (WO-2, WO-3A, WO-3B, WO-3C, WO-3D, WO-4)
 
 Deterministic corpus runner that loads ARC JSON and emits receipts.
 
@@ -9,6 +9,7 @@ Modes:
   - free-tile-receipts: Types-periodic tile verifier (WO-3B)
   - free-sbs-y-receipts: SBS-Y verifier on types (WO-3C)
   - free-sbs-param-receipts: SBS-Param verifier on types (WO-3D)
+  - free-intersect-pick: FREE intersection and pick with frozen order (WO-4)
 
 CLI:
   python -m arc.solve --mode pi-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
@@ -16,6 +17,7 @@ CLI:
   python -m arc.solve --mode free-tile-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
   python -m arc.solve --mode free-sbs-y-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
   python -m arc.solve --mode free-sbs-param-receipts --challenges path/to/tasks.json --out outputs/receipts.jsonl
+  python -m arc.solve --mode free-intersect-pick --challenges path/to/tasks.json --out outputs/receipts.jsonl
 """
 
 import argparse
@@ -35,6 +37,9 @@ from arc.free_simple import (
 from arc.free_sbs import (
     verify_SBS_Y, get_sbs_y_detailed_checks,
     verify_SBS_param, get_sbs_param_detailed_checks
+)
+from arc.free_prove import (
+    prove_free, compute_chosen_sha256
 )
 
 
@@ -461,6 +466,116 @@ def run_free_sbs_param_receipts(
     )
 
 
+def run_free_intersect_pick(
+    tasks: Dict[str, Dict[str, Any]],
+    out_path: Path,
+) -> None:
+    """
+    Run WO-4 FREE intersection and pick mode.
+
+    For each task:
+      - Run all WO-3 verifiers on each training pair
+      - Collect per-pair candidates (WO-3A: simple, WO-3B: tile, WO-3C: SBS-Y, WO-3D: SBS-param)
+      - Call prove_free to intersect and pick
+      - Write one task-level record
+
+    Args:
+        tasks: Dict mapping task_id -> task data
+        out_path: Output path for receipts JSONL file
+    """
+    receipts: List[Dict[str, Any]] = []
+
+    # Counters for summary
+    total_tasks = len(tasks)
+    proven_count = 0
+    unproven_count = 0
+
+    for task_id, task_data in tasks.items():
+        train_pairs = task_data.get("train", [])
+
+        # Collect per-pair candidates
+        per_pair_simple = []
+        per_pair_tile = []
+        per_pair_sbs_y = []
+        per_pair_sbs_p = []
+
+        for pair_index, pair in enumerate(train_pairs):
+            X = np.array(pair["input"], dtype=np.int32)
+            Y = np.array(pair["output"], dtype=np.int32)
+
+            # WO-3A: Simple FREE verifiers
+            simple_cands = verify_simple_free(X, Y)
+            per_pair_simple.append(simple_cands)
+
+            # WO-3B: Tile on types
+            T_Y, _ = types_from_output(Y)
+            tile_cand = verify_tile_types(X, Y, T_Y)
+            per_pair_tile.append(tile_cand)
+
+            # WO-3C: SBS-Y on types
+            sbs_y_cand = verify_SBS_Y(X, T_Y)
+            per_pair_sbs_y.append(sbs_y_cand)
+
+            # WO-3D: SBS-Param on types
+            sbs_p_cand = verify_SBS_param(X, Y)
+            per_pair_sbs_p.append(sbs_p_cand)
+
+        # Call prove_free to intersect and pick
+        status, proof_data = prove_free(
+            task_data,
+            per_pair_simple,
+            per_pair_tile,
+            per_pair_sbs_y,
+            per_pair_sbs_p
+        )
+
+        # Build per-pair receipt structure
+        per_pair_receipts = []
+        for pair_index in range(len(train_pairs)):
+            # Collect all candidates for this pair
+            pair_candidates = []
+            pair_candidates.extend(per_pair_simple[pair_index])
+            if per_pair_tile[pair_index] is not None:
+                pair_candidates.append(per_pair_tile[pair_index])
+            if per_pair_sbs_y[pair_index] is not None:
+                pair_candidates.append(per_pair_sbs_y[pair_index])
+            if per_pair_sbs_p[pair_index] is not None:
+                pair_candidates.append(per_pair_sbs_p[pair_index])
+
+            per_pair_receipts.append({
+                "pair_index": pair_index,
+                "candidates": pair_candidates
+            })
+
+        # Build task-level receipt
+        task_receipt = {
+            "task_id": task_id,
+            "free_intersection": {
+                "per_pair": per_pair_receipts,
+                "intersected": proof_data["intersected"]
+            }
+        }
+
+        if status == "FREE_PROVEN":
+            task_receipt["free_intersection"]["chosen"] = proof_data["chosen"]
+            task_receipt["free_intersection"]["order_rank"] = proof_data["order_rank"]
+            task_receipt["free_intersection"]["chosen_sha256"] = compute_chosen_sha256(proof_data["chosen"])
+            proven_count += 1
+        else:
+            task_receipt["free_intersection"]["reason"] = proof_data["reason"]
+            unproven_count += 1
+
+        receipts.append(task_receipt)
+
+    # Write all receipts to JSONL
+    write_jsonl(out_path, receipts)
+
+    # Log summary
+    logging.info(
+        f"Processed tasks={total_tasks}, proven={proven_count}, unproven={unproven_count}"
+    )
+
+
 def main() -> None:
     """CLI entry point with argparse."""
     # Configure logging (single INFO line per WO-2)
@@ -478,8 +593,8 @@ def main() -> None:
         "--mode",
         type=str,
         required=True,
-        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts", "free-sbs-param-receipts"],
-        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), free-sbs-y-receipts (WO-3C), or free-sbs-param-receipts (WO-3D)",
+        choices=["pi-receipts", "free-simple-receipts", "free-tile-receipts", "free-sbs-y-receipts", "free-sbs-param-receipts", "free-intersect-pick"],
+        help="Solver mode: pi-receipts (WO-2), free-simple-receipts (WO-3A), free-tile-receipts (WO-3B), free-sbs-y-receipts (WO-3C), free-sbs-param-receipts (WO-3D), or free-intersect-pick (WO-4)",
     )
 
     parser.add_argument(
@@ -535,6 +650,11 @@ def main() -> None:
         )
     elif args.mode == "free-sbs-param-receipts":
         run_free_sbs_param_receipts(
+            tasks=tasks,
+            out_path=args.out,
+        )
+    elif args.mode == "free-intersect-pick":
+        run_free_intersect_pick(
             tasks=tasks,
             out_path=args.out,
         )
