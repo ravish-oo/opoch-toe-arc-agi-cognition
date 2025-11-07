@@ -2,7 +2,7 @@ Locked. Here are the **v0 high-level Work Orders** — bottoms-up, atomic, self-
 
 ---
 
-## WO-1 — Π Ruler (Types)
+## WO-1 — Π Ruler (Types) ✅ COMPLETED
 
 **Goal:** Implement the fixed, idempotent Π typing on any grid.
 
@@ -14,7 +14,7 @@ Locked. Here are the **v0 high-level Work Orders** — bottoms-up, atomic, self-
 
 ---
 
-## WO-2 — Harness + Receipts Skeleton
+## WO-2 — Harness + Receipts Skeleton ✅ COMPLETED
 
 **Goal:** Corpus runner and per-task receipts plumbing, *no FREE yet*.
 
@@ -26,7 +26,7 @@ Locked. Here are the **v0 high-level Work Orders** — bottoms-up, atomic, self-
 
 ---
 
-## WO-3A — FREE Verifiers: Identity / Mirror-Concat / V-Double / Concat-Dup
+## WO-3A — FREE Verifiers: Identity / Mirror-Concat / V-Double / Concat-Dup ✅ COMPLETED
 
 **Goal:** Per training pair, verify “simple” terminals exactly (color-level equality where defined).
 
@@ -43,7 +43,7 @@ Locked. Here are the **v0 high-level Work Orders** — bottoms-up, atomic, self-
 
 ---
 
-## WO-3B — FREE Verifier: Types-Periodic Tile
+## WO-3B — FREE Verifier: Types-Periodic Tile ✅ COMPLETED
 
 **Goal:** Detect integer blow-up by **types** periodicity (FREE).
 
@@ -55,7 +55,7 @@ Locked. Here are the **v0 high-level Work Orders** — bottoms-up, atomic, self-
 
 ---
 
-## WO-3C — FREE Verifier: SBS-Y (Selector-Driven Block Substitution from Π(Y))
+## WO-3C — FREE Verifier: SBS-Y (Selector-Driven Block Substitution from Π(Y)) ✅ COMPLETED
 
 **Goal:** Prove SBS using **templates from training output types**.
 
@@ -67,7 +67,7 @@ Locked. Here are the **v0 high-level Work Orders** — bottoms-up, atomic, self-
 
 ---
 
-## WO-3D — FREE Verifier: SBS-Param (Templates from Π(X))
+## WO-3D — FREE Verifier: SBS-Param (Templates from Π(X)) ✅ COMPLETED
 
 **Goal:** Prove SBS using **templates from input types** (the 007bbfb7 fix).
 
@@ -79,7 +79,145 @@ Locked. Here are the **v0 high-level Work Orders** — bottoms-up, atomic, self-
 
 ---
 
-## WO-4 — FREE Intersection + Pick (Frozen Order)
+## WO-3E — FREE Verifiers: **D4 Isometries** + **Integer Translations**
+
+**Scope (types only)**
+For each train pair ((X!\to Y)), verify:
+
+* `D4(rot90|rot180|rot270|flip_h|flip_v|flip_h+rot90|flip_h+rot270)`: prove `T_Y == d4(T_X)` where `d4` uses `np.rot90`/`np.fliplr`/`np.flipud` on **types** (not colors) ([NumPy][1]).
+* `translate(dr, dc)`: prove `T_Y == np.roll(T_X, shift=(dr, dc), axis=(0,1))` (pure wrap translation) on **types** ([NumPy][2]).
+
+**Libs & calls (no custom algos)**
+`numpy.rot90` (doc) ([NumPy][1]), `numpy.fliplr`/`flipud`, `numpy.roll` (doc) ([NumPy][2]), `numpy.array_equal`.
+
+**IO**
+`verify_d4_and_translate(T_X, T_Y) -> List[(kind, params)]`
+
+**Receipts**
+For each candidate: record `kind`, `params`, and boolean `array_equal(T_Y, transform(T_X))`.
+
+**Pass**
+Runs on all pairs, no false positives.
+
+**Runner wiring**
+Only **WO-4** consumes these candidates. No direct use in `solve.py`.
+
+---
+
+## WO-3F — FREE Verifiers: **H/V concat** + **Banded double** (types only)
+
+**Scope (types only)**
+Per pair, verify **composition-free** duplications on **types**:
+
+* `h-concat-dup`: (T_Y = [T_X\ |\ T_X]) via `np.concatenate([T_X, T_X], axis=1)` (documented) ([NumPy][3]).
+* `v-concat-dup`: (T_Y = [T_X ; T_X]) via `np.concatenate([T_X, T_X], axis=0)` ([NumPy][3]).
+* `banded v-double / h-double` (optional v1): prove (T_Y) equals two stacked/side-by-side **bands** of (T_X) without mixing types across the band boundary (implemented by slicing and concatenation; mature `np.concatenate`).
+
+**Libs & calls**
+`numpy.concatenate` (doc) ([NumPy][3]), `numpy.array_equal`.
+
+**IO**
+`verify_concat_banded(T_X, T_Y) -> List[(kind, params)]` (params can be `None` or band sizes).
+
+**Receipts**
+Record shapes and `array_equal` checks of subblocks.
+
+**Pass**
+No false positives.
+
+**Runner**
+WO-4 only.
+
+---
+
+## WO-3B/3C/3D **(Already done)** — **Integer tile** + **SBS-Y** + **SBS-Param**
+
+* Tile(types) uses `np.tile` or `np.take(..., mode='wrap')` on **types** (docs) ([scikit-image.org][4]).
+* SBS-Y/Param use `reshape` + `moveaxis` on **types** to partition blocks; compare with `array_equal` (docs for `moveaxis`) ([NumPy][5]).
+
+*No change here; listed for completeness.*
+
+---
+
+## WO-3G — FREE Verifier: **Component-wise transport (per-component pose, types only)**
+
+**Scope (types only)**
+Per pair, detect **connected components** in (T_X) and prove that each component is carried to a corresponding set of components in (T_Y) via a **single global pose** (composition of a D4 and a translation).
+
+1. Label components in (T_X) and (T_Y) with **4-connectivity** using `skimage.measure.label` (documented; `connectivity=1`) ([scikit-image.org][4]).
+2. For each labeled component in (T_X), extract its type mask and bounding box; apply each D4 pose and integer translations (`np.rot90`, `np.roll`) and verify exact equality to **some** union of labeled components in (T_Y) (types only) ([NumPy][1]).
+3. Accept if a **single pose** explains all components (same D4 and same translation per component relative to its bbox origin).
+
+**Libs & calls**
+`skimage.measure.label` (4-conn) ([scikit-image.org][4]), `numpy.rot90` ([NumPy][1]), `numpy.roll` ([NumPy][2]), `numpy.array_equal`.
+
+**IO**
+`verify_component_transport(T_X, T_Y) -> Optional(("component_transport", (d4, dr, dc)))`
+
+**Receipts**
+
+* Component counts in (T_X, T_Y); per component: bbox, applied pose, boolean match.
+* `components_covered = 100%` and `single_pose=True`.
+
+**Pass**
+No false positives; returns one terminal if every (X) component is explained by the same pose.
+
+**Runner**
+WO-4 consumes this terminal at **lower priority** than `identity` if you keep the frozen order or **insert** after D4/translate to reduce “identity” dominance (you can append to the order without regressing v0).
+
+---
+
+## WO-3H — FREE Verifier: **Stripe / Column / Row projections** (types only)
+
+**Scope (types only)**
+Per pair, prove that (T_Y) is obtained by selecting/stacking rows or columns of (T_X) with a **fixed pattern** (e.g., 3×7→3×3 left/right fold; stride-2 select; interleave).
+
+* Implement patterns as **index maps** over axes using `np.take(indices, axis=?, mode='wrap')` (doc) and/or simple slicing; compare with `array_equal` on **types** ([NumPy][6]).
+
+**Libs & calls**
+`numpy.take(mode='wrap')` (doc) ([NumPy][6]), `numpy.array_equal`.
+
+**IO**
+`verify_stripe_maps(T_X, T_Y) -> Optional(("band_map", pattern_spec))`
+`pattern_spec` is a small tuple: (axis, indices or stride, fold rule).
+
+**Receipts**
+Record `(axis, indices/stride)`, `array_equal` true, and the number of selected rows/cols.
+
+**Pass**
+No false positives; patterns must be **constant across all rows/cols**.
+
+**Runner**
+WO-4 consumes this terminal; append it **after** concat/doubles and before tile/SBS to tighten structure early.
+
+---
+
+## WO-3I — FREE Verifier: **Type-channel permutations** (types only)
+
+**Scope (types only)**
+Some ARC demos “rename” types (permutation of Π-ids) without changing geometry. Verify that (T_Y) is a **global relabeling** of (T_X): (T_Y = P(T_X)) for a **single permutation** (P) of type ids.
+
+* Build mapping by pairing sorted type masks (e.g., lexicographically encode each type mask by `np.flatnonzero` indices) and verify **one-to-one** mapping such that `T_Y == P(T_X)`.
+
+**Libs & calls**
+`numpy.flatnonzero`, `numpy.array_equal`.
+
+**IO**
+`verify_type_perm(T_X, T_Y) -> Optional(("type_perm", mapping_hash))`
+
+**Receipts**
+
+* Number of types matched, a hash of the mapping, and boolean `array_equal(T_Y, P(T_X))`.
+
+**Pass**
+No false positives (requires a global bijection).
+
+**Runner**
+WO-4 consumes this (place it with lowest priority; it’s rarely needed but harmless to check).
+
+---
+
+## WO-4 — FREE Intersection + Pick (Frozen Order) ✅ COMPLETED
 
 **Goal:** Task-level proof: intersect per-pair candidates and select terminal per frozen order.
 
@@ -93,7 +231,7 @@ Locked. Here are the **v0 high-level Work Orders** — bottoms-up, atomic, self-
 
 ---
 
-## WO-5 — Transport Types + Disjointify
+## WO-5 — Transport Types + Disjointify ✅ COMPLETED
 
 **Goal:** Build the **test** type mosaic exactly as the proven FREE map dictates; keep copies disjoint.
 
@@ -105,7 +243,7 @@ Locked. Here are the **v0 high-level Work Orders** — bottoms-up, atomic, self-
 
 ---
 
-## WO-6 — Quotas K (Paid) + Y₀ Selection
+## WO-6 — Quotas K (Paid) + Y₀ Selection ✅ COMPLETED
 
 **Goal:** Count per-type color quotas from one training output; deterministic Y₀ policy.
 
@@ -117,7 +255,7 @@ Locked. Here are the **v0 high-level Work Orders** — bottoms-up, atomic, self-
 
 ---
 
-## WO-7 — Fill by Rank + Idempotence
+## WO-7 — Fill by Rank + Idempotence ✅ COMPLETED
 
 **Goal:** Produce (Y^*) via the meet rule and certify fixed-point behavior.
 
@@ -129,7 +267,7 @@ Locked. Here are the **v0 high-level Work Orders** — bottoms-up, atomic, self-
 
 ---
 
-## WO-8 — v0 Runner (Batch + Audit)
+## WO-8 — v0 Runner (Batch + Audit) ✅ COMPLETED
 
 **Goal:** End-to-end solve on all tasks we can prove FREE for; write predictions and receipts.
 

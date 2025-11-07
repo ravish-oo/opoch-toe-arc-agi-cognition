@@ -10,9 +10,10 @@ For each task with multiple training pairs, this module:
 Frozen simplicity order (rank):
   0: identity
   1: h-mirror-concat, v-double, h-concat-dup, v-concat-dup
-  2: tile
-  3: SBS-Y
-  4: SBS-param
+  2: band_map
+  3: tile
+  4: SBS-Y
+  5: SBS-param
 
 This is a task-level operation (not per-pair).
 """
@@ -59,15 +60,16 @@ def get_order_rank(kind: str) -> int:
     Frozen order (from WO-4):
       0: identity
       1: h-mirror-concat, v-double, h-concat-dup, v-concat-dup
-      2: tile
-      3: SBS-Y
-      4: SBS-param
+      2: band_map
+      3: tile
+      4: SBS-Y
+      5: SBS-param
 
     Args:
         kind: FREE morphism kind string
 
     Returns:
-        Integer rank (0-4, or 99 for unknown)
+        Integer rank (0-5, or 99 for unknown)
     """
     order = {
         "identity": 0,
@@ -75,9 +77,10 @@ def get_order_rank(kind: str) -> int:
         "v-double": 1,
         "h-concat-dup": 1,
         "v-concat-dup": 1,
-        "tile": 2,
-        "SBS-Y": 3,
-        "SBS-param": 4,
+        "band_map": 2,
+        "tile": 3,
+        "SBS-Y": 4,
+        "SBS-param": 5,
     }
     return order.get(kind, 99)
 
@@ -87,13 +90,14 @@ def prove_free(
     per_pair_simple: List[List[Cand]],
     per_pair_tile: List[Optional[Cand]],
     per_pair_sbs_y: List[Optional[Cand]],
-    per_pair_sbs_p: List[Optional[Cand]]
+    per_pair_sbs_p: List[Optional[Cand]],
+    per_pair_stripe: List[List[Cand]] = None
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Prove FREE morphism for a task by intersecting per-pair candidates.
 
     Algorithm:
-      1. For each pair, collect all candidates (simple + tile + SBS-Y + SBS-param)
+      1. For each pair, collect all candidates (simple + stripe + tile + SBS-Y + SBS-param)
       2. Normalize to hashable form (dicts → tuples)
       3. Build set per pair
       4. Intersect all sets: candidates must appear in EVERY pair
@@ -106,6 +110,7 @@ def prove_free(
         per_pair_tile: List of optional tile candidates from WO-3B per pair
         per_pair_sbs_y: List of optional SBS-Y candidates from WO-3C per pair
         per_pair_sbs_p: List of optional SBS-param candidates from WO-3D per pair
+        per_pair_stripe: List of candidate lists from WO-3H per pair (optional)
 
     Returns:
         Tuple of:
@@ -118,6 +123,10 @@ def prove_free(
     """
     num_pairs = len(per_pair_simple)
 
+    # Handle optional stripe candidates (default to empty lists)
+    if per_pair_stripe is None:
+        per_pair_stripe = [[] for _ in range(num_pairs)]
+
     # Step 1: Build sets per pair
     sets = []
     for pair_idx in range(num_pairs):
@@ -126,6 +135,9 @@ def prove_free(
 
         # Simple candidates (WO-3A)
         candidates.extend(per_pair_simple[pair_idx])
+
+        # Stripe candidates (WO-3H)
+        candidates.extend(per_pair_stripe[pair_idx])
 
         # Tile candidate (WO-3B)
         if per_pair_tile[pair_idx] is not None:
